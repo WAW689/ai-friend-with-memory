@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover 是刘海屏安全区的前提 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<!-- 加到主屏幕后以全屏 App 形式打开 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="朋友">
+<meta name="theme-color" content="#0b0d10">
+<link rel="manifest" href="/app.webmanifest">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+<title>朋友</title></head>
+<body>
+
+<!-- 口令门槛：只有第一次需要 -->
+<div id="gate" class="gate hidden">
+  <div class="gate-card">
+    <div class="gate-logo">朋友</div>
+    <p class="gate-tip">请输入访问口令<br><span>（启动服务时终端里会打印）</span></p>
+    <input id="gate-input" type="password" inputmode="text" autocomplete="off" placeholder="访问口令">
+    <button id="gate-btn" class="primary">进入</button>
+    <p id="gate-error" class="gate-error"></p>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="app" class="app hidden">
+  <header class="topbar">
+    <div class="who">
+      <div class="avatar" id="avatar">·</div>
+      <div class="who-text">
+        <div class="name" id="name">朋友</div>
+        <div class="status" id="status">在线</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button id="refresh" class="icon-btn" title="刷新">↻</button>
+      <button id="open-settings" class="icon-btn" title="设置">⚙</button>
+    </div>
+  </header>
+
+  <main id="messages" class="messages"></main>
+
+  <!-- 用户在翻历史时新消息不打断他，给个入口跳回最新 -->
+  <button id="jump-latest" class="jump hidden" title="回到最新">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d="M12 16 5 9h14z" fill="currentColor"/>
+    </svg>
+  </button>
+
+  <div id="hold-banner" class="hold-banner hidden"></div>
+
+  <footer class="composer">
+    <!-- 待发送的图片预览 -->
+    <div id="composer-previews" class="composer-previews hidden"></div>
+    <div class="composer-row">
+      <!--
+        附件按钮。容器是 position:relative，JS 会把新建的文件选择框挂进来——
+        选择框是绝对定位铺满容器的，所以必须挂在按钮自己的容器里。
+        挂到 composer-row 上的话它会铺满整行、挡住输入框和发送键。
+      -->
+      <span class="attach-wrap">
+        <button id="attach" class="attach-btn" title="发图片" type="button">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <path d="M16.5 6.5v9a4.5 4.5 0 0 1-9 0V6a3 3 0 0 1 6 0v8.5a1.5 1.5 0 0 1-3 0V7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </span>
+      <textarea id="input" rows="1" placeholder="说点什么…" enterkeyhint="send"></textarea>
+      <button id="send" class="send-btn" title="发送">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+          <path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12 2-12 2z" fill="currentColor"/>
+        </svg>
+      </button>
+    </div>
+    <!--
+      版本号直接显示在界面上。
+      手机端排查最烦的是"跑的是哪一版"说不清——iOS 缓存顽固，
+      下拉刷新经常没用。有了这一行，看一眼就知道该不该重新加载。
+    -->
+    <div class="build-line"><span id="build"></span></div>
+  </footer>
+</div>
+
+<!-- 设置面板 -->
+<div id="sheet" class="sheet hidden">
+  <div class="sheet-backdrop" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-tabs">
+      <button class="tab active" data-tab="proactive">主动</button>
+      <button class="tab" data-tab="persona">人设</button>
+      <button class="tab" data-tab="memory">记忆</button>
+      <button class="tab" data-tab="system">连接</button>
+    </div>
+    <div class="sheet-body" id="sheet-body"></div>
+    <div class="sheet-foot">
+      <button id="sheet-close" class="ghost">关闭</button>
+      <button id="sheet-save" class="primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<!-- 改头像 -->
+<div id="avatar-sheet" class="sheet hidden">
+  <div class="sheet-backdrop" data-avatar-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-grabber"></div>
+    <div class="avatar-head">
+      <div class="avatar avatar-preview" id="avatar-preview">·</div>
+      <div class="avatar-hint">点头像改</div>
+    </div>
+    <div class="sheet-body">
+      <div class="field">
+        <label>用文字或 emoji</label>
+        <div class="emoji-row" id="emoji-row"></div>
+        <input type="text" id="avatar-text" maxlength="4" placeholder="或者自己输一个字">
+        <div class="hint">最多 2 个字符。留空 = 用名字首字。</div>
+      </div>
+      <div class="field">
+        <label>或者上传图片</label>
+        <button class="ghost wide" id="avatar-pick">选择图片</button>
+        <input type="file" id="avatar-file" accept="image/*" hidden>
+        <div class="hint">会自动压缩到 400 KB 以内再上传，原图不会离开你的手机。</div>
+      </div>
+      <div class="result hidden" id="avatar-result"></div>
+      <button class="danger wide" id="avatar-reset">恢复默认（名字首字）</button>
+    </div>
+    <div class="sheet-foot">
+      <button id="avatar-cancel" class="ghost">取消</button>
+      <button id="avatar-save" class="primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

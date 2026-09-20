@@ -1,0 +1,816 @@
+/**
+ * 对话引擎。整个产品的行为都在这里：
+ * - respond(): 用户说话 → 流式回复 → 存盘 → 后台抽记忆/压缩摘要
+ * - runProactiveCheck(): 定时醒来 → 判断该不该开口 → 发消息 + 推送
+ * - 拟人化：打字延迟、偶尔连发两条、对方在看在就不推手机
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import { PATHS, DEFAULT_MEMORY, loadConfig } from './config.js'
+import { complete, completeJson, extractJson, streamChat } from './llm.js'
+import { push, recordPush } from './bark.js'
+import { runBackup } from './backup.js'
+import { readRecentImages, saveImage } from './images.js'
+import {
+  buildChatSystemPrompt,
+  buildMemoryPrompt,
+  buildProactiveDecisionPrompt,
+  buildProactiveMessagePrompt,
+  buildSummaryPrompt,
+  renderTranscript,
+} from './prompts.js'
+import { store } from './storage.js'
+import { HOUR, MINUTE, appendJsonl, humanAgo, humanDuration, localDateKey, log, now, randInt, readJson, readJsonl, sleep, truncate, writeJsonAtomic } from './util.js'
+
+/* --------------------------------------------------------------- 文本资产 */
+
+export function readPersona() {
+  try {
+    return fs.readFileSync(PATHS.persona, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+export function writePersona(text) {
+  fs.writeFileSync(PATHS.persona, String(text), 'utf8')
+}
+
+/**
+ * 从人设里读出角色的名字，用于推送标题和聊天界面。
+ *
+ * 为什么从人设读而不是单独存一个字段：
+ * 名字是**角色身份的一部分**，人设里必然写着"名字叫「XX」"。
+ * 再存一份就一定会不一致——改了人设忘了改配置，界面和推送就自相矛盾。
+ * 所以人设是唯一事实来源，这里只在展示时解析一次（按 mtime 缓存，改完立刻生效）。
+ */
+const FALLBACK_NAME = '朋友'
+let nameCache = { mtime: -1, name: FALLBACK_NAME }
+
+export function characterName() {
+  try {
+    const stat = fs.statSync(PATHS.persona)
+    if (stat.mtimeMs === nameCache.mtime) return nameCache.name
+
+    let name = ''
+    const lines = fs.readFileSync(PATHS.persona, 'utf8').split('\n').slice(0, 12)
+    for (const line of lines) {
+      // 只认"名字叫/叫做/名字是「XX」"这类明确写法，避免误抓正文
+      const match = line.match(/名字(?:叫做|叫|是)\s*[「『"“\[]?([^」』"”\]。，,、\s]+)/)
+      if (match) {
+        name = match[1].trim()
+        break
+      }
+    }
+    nameCache = { mtime: stat.mtimeMs, name: name || FALLBACK_NAME }
+    return nameCache.name
+  } catch {
+    return FALLBACK_NAME
+  }
+}
+
+export function readMemory() {
+  try {
+    return fs.readFileSync(PATHS.memory, 'utf8')
+  } catch {
+    return DEFAULT_MEMORY
+  }
+}
+
+export function writeMemory(text) {
+  fs.writeFileSync(PATHS.memory, String(text), 'utf8')
+}
+
+export function readSummary() {
+  const file = readJson(PATHS.summary, {}) || {}
+  return { text: file.text ?? '', upToSeq: file.upToSeq ?? 0 }
+}
+
+export function writeSummary(text, upToSeq) {
+  writeJsonAtomic(PATHS.summary, { text, upToSeq, updatedAt: now() })
+}
+
+/* ----------------------------------------------------------- 运行时活动 */
+
+/**
+ * 记录"用户此刻在不在线"。
+ * 前端每次心跳/发消息都会刷新；主动判断会参考它，
+ * 对方正在盯着屏幕时就别推手机了。
+ */
+const activity = {
+  lastSeenAt: 0,
+  lastUserActionAt: 0,
+}
+
+export function noteAppActive() {
+  activity.lastSeenAt = now()
+}
+
+export function noteUserAction() {
+  const ts = now()
+  activity.lastSeenAt = ts
+  activity.lastUserActionAt = ts
+}
+
+function isUserWatchingScreen(windowMs = 90 * 1000) {
+  return activity.lastSeenAt > 0 && now() - activity.lastSeenAt < windowMs
+}
+
+/* --------------------------------------------------------------- 上下文 */
+
+function buildContext(cfg) {
+  const summary = readSummary()
+  // 摘要已经覆盖的部分不重复喂给模型
+  const fresh = summary.upToSeq ? store.since(summary.upToSeq) : [...store.messages]
+  const recent = attachImages(fresh.slice(-cfg.context.recentMessages), {
+    maxCount: cfg.context.maxImagesInContext ?? 4,
+  })
+
+  /*
+   * 时间锚点一定要取"对方上次说话"，不能取"最后一条消息"。
+   *
+   * 主动发过消息之后，最后一条消息就是你自己刚发的那条，
+   * 于是"距离上次说话"永远显示"刚刚"——模型会以为自己刚聊完，
+   * 然后不断重复同一句话。这是之前 force 路径记忆混乱的主因之一。
+   */
+  const lastUser = store.lastUserMessage()
+  const lastAssistant = store.lastAssistantMessage()
+
+  return {
+    persona: readPersona(),
+    memory: readMemory(),
+    summary: summary.text,
+    recent,
+    lastUserMessageAt: lastUser?.at ?? 0,
+    lastAssistantMessageAt: lastAssistant?.at ?? 0,
+    transcript: renderTranscript(recent),
+  }
+}
+
+/**
+ * 把一条消息整理成喂给模型的形状。
+ *
+ * 有图的消息，content 要写成块数组（官方格式）：
+ *   [{type:'text',text:...}, {type:'image_url',image_url:{url:'data:...'}}]
+ * 没图的仍然用纯字符串——省 token，也让大多数消息保持简单。
+ *
+ * 图片只能放在 user 消息里：官方对 system / assistant 里的图片直接返回 400。
+ */
+export function toModelMessage(m) {
+  const urls = Array.isArray(m.imageUrls) ? m.imageUrls : []
+  if (m.role !== 'user' || urls.length === 0) {
+    return { role: m.role, content: m.text }
+  }
+  return {
+    role: 'user',
+    content: [
+      ...(m.text ? [{ type: 'text', text: m.text }] : []),
+      ...urls.map((url) => ({ type: 'image_url', image_url: { url } })),
+    ],
+  }
+}
+
+/**
+ * 给最近的消息补上图片的 data URL。
+ *
+ * 只给最近几张配图，更早的图在文字里只留"[图片]"占位——
+ * 图片按维度计费（一张最多 1024 token），全带上会把 prompt 撑爆，也很贵。
+ */
+function attachImages(recent, { maxCount = 4 } = {}) {
+  const budget = new Map()
+  let used = 0
+
+  // 从后往前挑，优先保证最近发的图能看到
+  for (let i = recent.length - 1; i >= 0 && used < maxCount; i--) {
+    const ids = recent[i].meta?.images
+    if (!Array.isArray(ids) || ids.length === 0) continue
+    const take = []
+    for (const id of ids) {
+      if (used >= maxCount) break
+      take.push(id)
+      used++
+    }
+    if (take.length) budget.set(recent[i].seq, take)
+  }
+
+  return recent.map((m) => {
+    const ids = budget.get(m.seq)
+    if (!ids) return m
+    const found = readRecentImages(ids, { maxCount: ids.length })
+    if (found.length === 0) return m
+    return { ...m, imageUrls: found.map((f) => f.url) }
+  })
+}
+
+/* ------------------------------------------------------------ 用户说话 */
+
+/**
+ * 用户发来一句话（可带图），流式生成回复。
+ *
+ * @param {string} text
+ * @param {{ onChunk?: (delta: string, full: string) => void, signal?: AbortSignal, images?: string[] }} hooks
+ *        images 是若干 data URL
+ * @returns {Promise<{ message: object, full: string }>}
+ */
+export async function respond(text, hooks = {}) {
+  const cfg = loadConfig()
+  const content = String(text ?? '').trim()
+  const incoming = Array.isArray(hooks.images) ? hooks.images : []
+
+  if (!content && incoming.length === 0) throw new Error('消息内容不能为空')
+
+  noteUserAction()
+
+  // 图片先落盘，消息里只记 id
+  const saved = []
+  for (const dataUrl of incoming.slice(0, 4)) {
+    try {
+      saved.push(saveImage(dataUrl))
+    } catch (err) {
+      log.warn(`一张图片没能保存：${err.message}`)
+    }
+  }
+
+  const userMessage = store.append({
+    role: 'user',
+    text: content || '（发了张图）',
+    ...(saved.length ? { meta: { images: saved.map((s) => s.id) } } : {}),
+  })
+  store.markUserMessage(userMessage.at)
+
+  const ctx = buildContext(cfg)
+
+  /*
+   * 聊天场景的"距上次说话"要取**当前这条之前**的那条消息。
+   * ctx.recent 的最后一条就是刚存进去的这句话，直接用它算会永远是"刚刚"，
+   * 模型就不知道对方是隔了一天回来还是一直在聊。
+   */
+  const previous = ctx.recent.length >= 2 ? ctx.recent[ctx.recent.length - 2] : undefined
+
+  const messages = [
+    {
+      role: 'system',
+      content: buildChatSystemPrompt({ ...ctx, lastExchangeAt: previous?.at ?? 0 }),
+    },
+    ...ctx.recent.map(toModelMessage),
+  ]
+
+  store.state.generating = true
+  store.saveState()
+
+  let full = ''
+  try {
+    for await (const delta of streamChat(cfg, messages, { signal: hooks.signal })) {
+      full += delta
+      hooks.onChunk?.(delta, full)
+    }
+  } finally {
+    store.state.generating = false
+    store.saveState()
+  }
+
+  const cleaned = cleanupReply(full)
+  if (!cleaned) {
+    // 空回复也要留个痕迹，不然前端会一直转圈
+    const fallback = store.append({ role: 'assistant', text: '（刚刚走神了，你说啥）', kind: 'chat' })
+    store.markAssistantMessage(fallback.at)
+    scheduleBackgroundWork(cfg)
+    return { message: fallback, full: fallback.text }
+  }
+
+  const message = store.append({ role: 'assistant', text: cleaned })
+  store.markAssistantMessage(message.at)
+  scheduleBackgroundWork(cfg)
+  return { message, full: cleaned }
+}
+
+/** 模型偶尔会带上引号或旁白，清一下 */
+function cleanupReply(text) {
+  let out = String(text ?? '').trim()
+  // 去掉整体包裹的引号
+  if (/^["“][\s\S]*["”]$/.test(out) && out.length > 2) {
+    out = out.slice(1, -1).trim()
+  }
+  // 去掉偶发的旁白式开头
+  out = out.replace(/^(（[^）]*）|\([^)]*\))\s*/, '').trim()
+  return out
+}
+
+/* -------------------------------------------------------- 主动开口逻辑 */
+
+/** 判断现在是否处于静默时段 */
+export function inQuietHours(cfg, at = now()) {
+  const { quietStart, quietEnd } = cfg.proactive
+  const hour = new Date(at).getHours()
+  if (quietStart === quietEnd) return false
+  if (quietStart < quietEnd) return hour >= quietStart && hour < quietEnd
+  // 跨零点，例如 22 → 9
+  return hour >= quietStart || hour < quietEnd
+}
+
+/**
+ * 硬性条件检查。任何一条不满足就直接不发，连模型都不用叫。
+ * @returns {{ allowed: boolean, reason?: string }}
+ */
+export function proactiveGate(cfg, at = now()) {
+  const p = cfg.proactive
+  if (!p.enabled) return { allowed: false, reason: '主动消息已关闭' }
+  if (inQuietHours(cfg, at)) return { allowed: false, reason: '静默时段' }
+  if (store.proactiveCountToday(at) >= p.maxPerDay) return { allowed: false, reason: `今天已达上限 ${p.maxPerDay} 次` }
+  if (store.state.unansweredStreak >= p.maxUnanswered) {
+    return { allowed: false, reason: `已连发 ${store.state.unansweredStreak} 条没回，先安静` }
+  }
+  const lastUser = store.lastUserMessage()
+  if (lastUser && at - lastUser.at < p.minIdleMinutes * MINUTE) {
+    return { allowed: false, reason: `对方刚说过话（${humanAgo(lastUser.at, at)}）` }
+  }
+  if (!store.state.nextProactiveAt || at < store.state.nextProactiveAt) {
+    const wait = store.state.nextProactiveAt ? humanDuration(store.state.nextProactiveAt - at) : '尚未排期'
+    return { allowed: false, reason: `距下次窗口还有 ${wait}` }
+  }
+  return { allowed: true }
+}
+
+/**
+ * 记一次主动决策的流水。
+ *
+ * 为什么需要：state.json 里只存"最近一次"的拒绝理由，
+ * 看不到一整天的模式。而"它为什么总不找我"这类问题，
+ * 恰恰要看历史——是经常被闸门拦住，还是模型总说没必要。
+ *
+ * 只保留最近 N 条，且按天存文件，不做无限增长。
+ */
+export function recordProactiveEvent(event) {
+  const sent = Boolean(event.sent)
+  const line = {
+    at: now(),
+    // 两个都存：sent 给读取方判断，kind 给人看日志时一眼分清
+    sent,
+    kind: sent ? 'sent' : 'hold',
+    reason: event.reason ?? '',
+    messages: event.messages ?? [],
+    forced: Boolean(event.forced),
+    dryRun: Boolean(event.dryRun),
+  }
+  try {
+    appendJsonl(path.join(PATHS.data, 'proactive.jsonl'), line)
+    pruneProactiveLog()
+  } catch (err) {
+    log.warn(`写入主动决策流水失败：${err.message}`)
+  }
+  return line
+}
+
+/** 读最近 N 条主动决策流水（新的在前） */
+export function readProactiveEvents(limit = 30) {
+  const rows = readJsonl(path.join(PATHS.data, 'proactive.jsonl'))
+  return rows.slice(-limit).reverse()
+}
+
+/** 日志超过这个行数就裁掉最旧的，避免无限增长 */
+const PROACTIVE_LOG_MAX = 2000
+
+function pruneProactiveLog() {
+  const file = path.join(PATHS.data, 'proactive.jsonl')
+  try {
+    const rows = readJsonl(file)
+    if (rows.length <= PROACTIVE_LOG_MAX) return
+    const kept = rows.slice(-Math.floor(PROACTIVE_LOG_MAX * 0.8))
+    writeJsonAtomic(file, kept)
+    log.info(`主动决策流水已裁剪到 ${kept.length} 条`)
+  } catch (err) {
+    log.warn(`裁剪主动决策流水失败：${err.message}`)
+  }
+}
+
+/** 排下一次主动窗口（随机间隔，避免准点报到） */
+export function scheduleNextProactive(cfg = loadConfig()) {
+  const { minGapMinutes, maxGapMinutes } = cfg.proactive
+  const lo = Math.max(5, Math.min(minGapMinutes, maxGapMinutes))
+  const hi = Math.max(lo, Math.max(minGapMinutes, maxGapMinutes))
+  return store.scheduleNextProactive(randInt(lo, hi))
+}
+
+/**
+ * 模型判断"现在不发"之后的重排。
+ *
+ * 必须比"发完"的间隔短得多。
+ * 否则一旦模型连续几次说"不发"，每次都要再等 25-60 分钟才能问下一次，
+ * 结果就是一上午一条都不发——这正是之前实测到的现象：
+ * 09:12 判断不发之后，整整 94 分钟没有再检查过。
+ *
+ * 用户配的间隔是"两条消息之间至少隔多久"，不是"每次询问之间隔多久"。
+ */
+export function scheduleRetryAfterDecline(cfg = loadConfig()) {
+  const { minGapMinutes, maxGapMinutes } = cfg.proactive
+  // 取配置间隔的 1/4 到 1/2，并夹在 5-30 分钟之间
+  const lo = Math.max(5, Math.round(Math.min(minGapMinutes, maxGapMinutes) / 4))
+  const hi = Math.min(30, Math.max(lo + 3, Math.round(Math.max(minGapMinutes, maxGapMinutes) / 2)))
+  return store.scheduleNextProactive(randInt(lo, hi))
+}
+
+/**
+ * 醒来一次，决定要不要主动找对方。
+ * @param {{ force?: boolean, dryRun?: boolean }} options force 用于手动测试，跳过所有硬性拦截
+ */
+export async function runProactiveCheck(options = {}) {
+  const cfg = loadConfig()
+  const at = now()
+  const { force = false, dryRun = false } = options
+  // 演练模式要能看到"本来会发什么"，所以跳过硬性拦截，但绝不落盘
+  const bypassGate = force || dryRun
+
+  const gate = proactiveGate(cfg, at)
+  if (!gate.allowed && !bypassGate) {
+    store.state.lastHoldReason = gate.reason
+    store.saveState()
+    // 流水也记一条：闸门拦截（比如"距下次窗口还有 8 分钟"）
+    if (!dryRun) recordProactiveEvent({ sent: false, reason: `[闸门] ${gate.reason}` })
+    return { sent: false, reason: gate.reason }
+  }
+
+  const ctx = buildContext(cfg)
+  const context = {
+    lastUserAgo: humanAgo(store.state.lastUserMessageAt, at),
+    lastAssistantAgo: humanAgo(store.state.lastAssistantMessageAt, at),
+    unansweredStreak: store.state.unansweredStreak,
+    todayCount: store.proactiveCountToday(at),
+    userWatching: isUserWatchingScreen(),
+  }
+
+  const decisionPrompt = buildProactiveDecisionPrompt({ ...ctx, context })
+
+  // 什么时候让模型先做判断、什么时候直接生成：
+  // - 手动 force：跳过判断，直接发
+  // - dryRun：让它真的判一次，这样演练结果才有参考价值
+  // - 配置关掉 letModelDecide：直接生成
+  let decision
+  if (cfg.proactive.letModelDecide && !force) {
+    try {
+      decision = await completeJson(cfg, decisionPrompt, { maxTokens: 500 })
+    } catch (err) {
+      log.warn(`主动判断失败，这次跳过：${err.message}`)
+      if (!dryRun) scheduleRetryAfterDecline(cfg)
+      if (!dryRun) recordProactiveEvent({ sent: false, reason: `[判断失败] ${err.message}` })
+      return { sent: false, reason: `判断失败：${err.message}` }
+    }
+  } else {
+    decision = { send: true, reason: force ? '手动触发' : '配置为每次都发', messages: [] }
+  }
+
+  const wantsSend = decision?.send === true
+  if (!wantsSend) {
+    const reason = String(decision?.reason ?? '模型认为现在不适合开口')
+    store.state.lastHoldReason = reason
+    store.saveState()
+    // 关键：只是"这次不发"，不是"接下来一小时都别再问"。
+    // 用短重试窗口，让它过十来分钟还有机会再看一眼。
+    if (!dryRun) scheduleRetryAfterDecline(cfg)
+    if (!dryRun) recordProactiveEvent({ sent: false, reason })
+    log.info(`主动检查：不发（${truncate(reason, 50)}）→ 下次窗口重新排期`)
+    return { sent: false, reason, mood: decision?.mood, dryRun }
+  }
+
+  // 模型可能只给了 send=true 却没给内容，那就让它正经写一条
+  let queue = normalizeMessages(decision?.messages)
+  if (queue.length === 0) {
+    queue = await generateProactiveMessages(cfg, ctx, decision?.mood)
+  }
+  if (queue.length === 0) {
+    if (!dryRun) scheduleRetryAfterDecline(cfg)
+    if (!dryRun) recordProactiveEvent({ sent: false, reason: '[空内容] 模型没有产出可用的消息' })
+    return { sent: false, reason: '模型没有产出可用的消息' }
+  }
+
+  if (dryRun) {
+    recordProactiveEvent({ sent: false, dryRun: true, reason: decision?.reason, messages: queue })
+    return { sent: false, dryRun: true, wouldSend: queue, reason: decision?.reason, mood: decision?.mood }
+  }
+
+  const sent = []
+  for (let i = 0; i < queue.length; i++) {
+    if (i > 0) {
+      // 连发第二条前先"打一会儿字"
+      await sleep(randInt(1200, 3200))
+    }
+    const message = store.append({ role: 'assistant', text: queue[i], kind: 'proactive' })
+    store.noteProactive(message.at)
+    sent.push(message)
+    log.info(`主动发送（${i + 1}/${queue.length}）：${truncate(queue[i], 40)}`)
+  }
+
+  store.state.lastHoldReason = ''
+  store.state.lastAssistantMessageAt = now()
+  store.saveState()
+
+  // 对方不在看屏幕才推手机。
+  //
+  // force 模式（手动触发、以及测试）**不推送**：
+  // 那是调试用的路径，不该在用户手机上留痕。
+  // 之前没有这道判断，测试重复跑就把同一条消息推了十几遍，
+  // 而且推的还是用户自己说的那句话。
+  if (force) {
+    log.info('强制模式：已发送但不推送手机')
+  } else if (!context.userWatching) {
+    await sendPushFor(sent)
+  } else {
+    log.info('对方正在应用里，跳过推送')
+  }
+
+  scheduleNextProactive(cfg)
+  recordProactiveEvent({ sent: true, messages: sent.map((m) => m.text), forced: force, reason: decision?.reason })
+  return { sent: true, messages: sent.map((m) => m.text), reason: decision?.reason, mood: decision?.mood }
+}
+
+/**
+ * 生成主动开口的内容。
+ *
+ * 走的是**专用的主动提示词**，不是聊天提示词。
+ * 用聊天提示词会让模型以为自己是在回复，从而说出前后不搭的话。
+ *
+ * 时间锚点取"对方上次说话"，不是"最后一条消息"——
+ * 否则主动发过几条之后，它看到的永远是"刚刚"，然后不停重复同一句话。
+ */
+async function generateProactiveMessages(cfg, ctx, mood) {
+  const at = now()
+  const messages = buildProactiveMessagePrompt({
+    persona: ctx.persona,
+    memory: ctx.memory,
+    summary: ctx.summary,
+    transcript: ctx.transcript,
+    lastUserAgo: humanAgo(ctx.lastUserMessageAt, at),
+    lastAssistantAgo: humanAgo(ctx.lastAssistantMessageAt, at),
+    unansweredStreak: store.state.unansweredStreak,
+    todayCount: store.proactiveCountToday(at),
+    mood,
+  })
+
+  try {
+    const text = await complete(cfg, messages, {
+      temperature: cfg.model.temperature,
+      maxTokens: 600,
+    })
+
+    // 1) 正常路径：期望模型返回 {"messages": [...]}
+    const parsed = extractJson(text)
+    if (parsed && Array.isArray(parsed.messages)) {
+      return normalizeMessages(parsed.messages)
+    }
+
+    // 2) 解析失败但看得出是 JSON → 打捞里面已经写好的字符串，
+    //    绝不能把 JSON 原文当成消息发出去
+    if (/^\s*(?:```json)?\s*\{/.test(text) || /"messages"\s*:/.test(text)) {
+      const salvaged = normalizeMessages(salvageJsonStrings(text))
+      if (salvaged.length > 0) {
+        log.warn(`主动消息的 JSON 不完整，已打捞 ${salvaged.length} 条内容`)
+        return salvaged
+      }
+      log.warn('主动消息的 JSON 无法解析且打捞不到内容，这次跳过')
+      return []
+    }
+
+    // 3) 模型直接给了纯文本（没走 JSON）→ 按行切
+    return normalizeMessages(text.split('\n'))
+  } catch (err) {
+    log.warn(`主动消息生成失败：${err.message}`)
+    return []
+  }
+}
+
+/**
+ * 清洗模型给出的消息数组：去编号、去空行、最多两条。
+ *
+ * 还要防一类很难发现的错误：模型想返回 JSON，但因为 token 截断等原因
+ * 输出不完整，于是解析失败、回退到按行切分，结果 **整段 JSON 原文被当成消息发出去**。
+ * 用户会看到 `{"messages": ["..."]` 这种东西。
+ */
+function normalizeMessages(input) {
+  const list = Array.isArray(input) ? input : []
+  return list
+    .map((line) => String(line ?? '').trim())
+    .map(stripListPrefix)
+    .filter((line) => line.length > 0 && !looksLikeJsonGarbage(line))
+    .slice(0, 2)
+}
+
+/** 去掉行首的编号或项目符号 */
+function stripListPrefix(line) {
+  return line.replace(/^\s*(?:[-*•]|\d+[.、)])\s*/, '').trim()
+}
+
+/** 这行是不是"JSON 残渣"（不该被当成聊天内容发出去） */
+function looksLikeJsonGarbage(line) {
+  if (/^\s*\{\s*"?(messages|text|content)"?\s*:/i.test(line)) return true
+  if (line.startsWith('```')) return true
+  return false
+}
+
+/**
+ * 从一段残缺的 JSON 里把已经写好的字符串捞出来。
+ *
+ * 例：'{"messages": ["十一点去吃饭", "然后回' → ['十一点去吃饭']
+ * 比"整段丢弃"好得多：至少保住已经生成的完整内容。
+ */
+function salvageJsonStrings(text) {
+  const out = []
+  const re = /"((?:[^"\\]|\\.)*)"/g
+  let match
+  while ((match = re.exec(text)) !== null) {
+    const raw = match[1]
+    // 跳掉 JSON 的键名
+    if (raw === 'messages' || raw === 'message' || raw === 'text' || raw === 'content') continue
+    // 跳过被截断的最后一个字符串：它后面不是引号或 , ] }
+    const after = text.slice(re.lastIndex).trimStart()
+    const complete = after.startsWith(',') || after.startsWith(']') || after.startsWith('}')
+    if (!complete) continue
+    try {
+      out.push(JSON.parse(`"${raw}"`))
+    } catch {
+      out.push(raw)
+    }
+  }
+  return out
+}
+
+/**
+ * 推送主动消息到手机。
+ *
+ * 只推**自己刚发出的**消息。
+ *
+ * 之前没有这道检查，而 force 模式和测试走的是同一条推送路径，
+ * 于是把"用户自己说的最后一句话"也推给了用户——
+ * 实测用户手机上收到了自己发的"挺不错的，我十二点零五才下课"，
+ * 而且因为测试重复跑，同一条推了好几遍。
+ */
+async function sendPushFor(messages) {
+  /*
+   * 硬开关：FRIEND_NO_PUSH=1 时物理上不可能推送。
+   *
+   * 为什么需要这个：测试会跑真实代码路径，而推送会真的响用户手机。
+   * 光靠"force 模式不推"这种逻辑判断不够——实测还是漏了，
+   * 用户手机收到过自己发的消息，而且是十几遍。
+   * 与其靠判断，不如给测试一把总闸。
+   */
+  if (process.env.FRIEND_NO_PUSH === '1') {
+    log.info('FRIEND_NO_PUSH=1，跳过推送（测试环境）')
+    return
+  }
+
+  const cfg = loadConfig()
+
+  // 只推 assistant 发的。任何情况下都不该把用户自己的话推回给用户。
+  const own = messages.filter((m) => m.role === 'assistant')
+  if (own.length === 0) {
+    log.warn('没有可推送的自身消息（避免把用户自己的话推回去），跳过推送')
+    return
+  }
+
+  const body = own.map((m) => m.text).join('\n')
+
+  if (!cfg.bark.key) {
+    log.info('未配置 Bark Key，跳过推送')
+    recordPush({ ok: false, kind: 'proactive', reason: 'no-key', body: truncate(body, 80) })
+    return
+  }
+
+  // 标题优先用显式配置的 group；没配就用人设里的角色名。
+  // 不要在这里写死名字——改人设必须能带出正确的标题。
+  const title = (cfg.bark.group && String(cfg.bark.group).trim()) || characterName()
+
+  try {
+    await push(cfg, { body, title })
+    log.info(`已推送 Bark（标题：${title}）`)
+    recordPush({ ok: true, kind: 'proactive', title, body: truncate(body, 80) })
+  } catch (err) {
+    log.warn(`Bark 推送失败：${err.message}（消息已存下来，打开应用就能看到）`)
+    recordPush({ ok: false, kind: 'proactive', reason: err.message, title, body: truncate(body, 80) })
+  }
+}
+
+/* --------------------------------------------------- 后台：记忆与摘要 */
+
+/**
+ * 每次对话结束后，在后台做两件慢活：
+ * 1. 攒够消息就抽取长期记忆
+ * 2. 对话太长就滚动压缩成摘要
+ *
+ * 两件事都必须有节流，否则每来一条消息就会各调一次模型——
+ * 既费钱又拖慢响应，日志里会看到"已压缩摘要"刷屏。
+ */
+const bg = {
+  lastSummaryAt: 0,
+  lastSummarySeq: 0,
+  lastMemoryAt: 0,
+  memoryInFlight: false,
+  summaryInFlight: false,
+  lastBackupDay: '',
+  backupInFlight: false,
+}
+
+/** 摘要在覆盖这么多条新消息之前不再重算 */
+const SUMMARY_MIN_NEW_MESSAGES = 20
+/** 两次摘要之间至少隔这么久（毫秒） */
+const SUMMARY_MIN_INTERVAL_MS = 10 * 60 * 1000
+/** 两次记忆抽取之间至少隔这么久 */
+const MEMORY_MIN_INTERVAL_MS = 5 * 60 * 1000
+
+function scheduleBackgroundWork(cfg) {
+  const total = store.messages.length
+
+  /* ---------- 记忆抽取 ---------- */
+  const memoryDue = total - store.state.memoryCursor >= cfg.memory.extractEveryMessages
+  const memoryCooled = now() - bg.lastMemoryAt >= MEMORY_MIN_INTERVAL_MS
+  if (memoryDue && memoryCooled && !bg.memoryInFlight) {
+    store.state.memoryCursor = total
+    store.saveState()
+    bg.memoryInFlight = true
+    bg.lastMemoryAt = now()
+    void extractMemory(cfg)
+      .catch((err) => log.warn(`记忆抽取失败：${err.message}`))
+      .finally(() => {
+        bg.memoryInFlight = false
+      })
+  }
+
+  /* ---------- 摘要压缩 ---------- */
+  // 摘要覆盖到的位置
+  const covered = readSummary().upToSeq
+  const newSinceSummary = total - covered
+  const summaryDue =
+    total > cfg.context.summarizeAbove && newSinceSummary >= SUMMARY_MIN_NEW_MESSAGES
+  const summaryCooled = now() - bg.lastSummaryAt >= SUMMARY_MIN_INTERVAL_MS
+
+  if (summaryDue && summaryCooled && !bg.summaryInFlight) {
+    bg.summaryInFlight = true
+    bg.lastSummaryAt = now()
+    bg.lastSummarySeq = total
+    void rollSummary(cfg)
+      .catch((err) => log.warn(`摘要压缩失败：${err.message}`))
+      .finally(() => {
+        bg.summaryInFlight = false
+      })
+  }
+
+  /* ---------- 每日备份 ---------- */
+  // 用"今天备份过没有"判断，而不是定时器——
+  // 电脑睡眠/重启后定时器会错乱，日期判断不会。
+  const today = localDateKey()
+  if (bg.lastBackupDay !== today && !bg.backupInFlight) {
+    bg.backupInFlight = true
+    try {
+      const result = runBackup()
+      // 无论这次是不是真的写了盘（可能今天已经备过），都记下日期，
+      // 避免每次对话都去查一遍文件系统
+      bg.lastBackupDay = today
+      if (!result.created && result.reason) {
+        // 今天已经备过，静默跳过
+      }
+    } catch (err) {
+      log.warn(`备份失败：${err.message}`)
+    } finally {
+      bg.backupInFlight = false
+    }
+  }
+}
+
+/** 让模型更新长期记忆档案 */
+export async function extractMemory(cfg = loadConfig()) {
+  const existing = readMemory()
+  const transcript = renderTranscript(store.recent(40), { maxChars: 9000 })
+  if (!transcript) return { updated: false, reason: '没有可用对话' }
+
+  const text = await complete(cfg, buildMemoryPrompt({ existingMemory: existing, transcript }), { maxTokens: 800 })
+  const cleaned = text.trim()
+  if (!cleaned || cleaned.length < 10) return { updated: false, reason: '模型返回内容太短' }
+
+  writeMemory(cleaned)
+  log.info('已更新长期记忆档案')
+  return { updated: true, memory: cleaned }
+}
+
+/** 把早期对话压进摘要 */
+export async function rollSummary(cfg = loadConfig()) {
+  const total = store.messages.length
+  const keepRecent = cfg.context.recentMessages
+  const cutoffIndex = Math.max(0, total - keepRecent)
+  if (cutoffIndex <= 0) return { updated: false, reason: '消息还不够多' }
+
+  const toCompress = store.messages.slice(0, cutoffIndex).filter((m) => m.kind !== 'system')
+  if (toCompress.length < 10) return { updated: false, reason: '待压缩内容太少' }
+
+  const previous = readSummary()
+  const transcript = renderTranscript(toCompress, { maxChars: 14000 })
+  const text = await complete(cfg, buildSummaryPrompt({ previousSummary: previous.text, transcript }), { maxTokens: 600 })
+  const cleaned = text.trim()
+  if (!cleaned) return { updated: false, reason: '模型返回空摘要' }
+
+  const upToSeq = toCompress[toCompress.length - 1].seq
+  writeSummary(cleaned, upToSeq)
+  log.info(`已压缩摘要（覆盖到第 ${upToSeq} 条）`)
+  return { updated: true, summary: cleaned, upToSeq }
+}
+
+export { isUserWatchingScreen, buildContext, activity }
+
+/** 仅供测试使用，不要在生产路径里调用 */
+export const __debug = { normalizeMessages, salvageJsonStrings, looksLikeJsonGarbage }

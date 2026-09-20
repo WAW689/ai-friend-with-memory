@@ -1,0 +1,18 @@
+{
+  "name": "friend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "一个会主动找你聊天的 AI 朋友：自建网页 App + Bark 推送到 iPhone",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node test/all.js",
+    "backup": "node src/cli.js backup --now",
+    "status": "node src/cli.js status",
+    "check": "node src/cli.js check"
+  }
+}

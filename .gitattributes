@@ -1,0 +1,16 @@
+# 统一用 LF 存进仓库，检出时不转换。
+# Windows 上不加这个，每次 git add 都会刷一堆
+# "LF will be replaced by CRLF" 警告，而且别人克隆下来可能拿到 CRLF 导致脚本跑不了。
+* text=auto eol=lf
+
+# 这两个必须保持 LF，否则在 Linux 上没法执行
+*.sh text eol=lf
+start-friend.ps1 text eol=lf
+
+# 二进制文件不要当文本处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
