@@ -23,6 +23,7 @@
  * "她说自己在忙但其实没忙"，都不致命。
  */
 import { now, randInt } from './util.js'
+import { parseActivity } from './activity.js'
 import { readJournal } from './life.js'
 
 /**
@@ -36,17 +37,56 @@ import { readJournal } from './life.js'
  *   - 低于 15 秒感知不到"她在忙"，那不如不延迟
  *   - 高于 3 分钟用户会以为消息没发出去，开始怀疑服务挂了
  */
-const BUSY_PATTERNS = [
-  {
-    level: 'heavy',
-    /*
-     * 动宾和补语两种形态都要覆盖。
-     * 踩过一次：模式里只写了"洗澡"，而她的流水是"凑合洗完"——
-     * "洗完"没匹配上，于是她明明刚洗完澡却被判成不忙。
-     */
-    re: /煮|做饭|洗碗|洗澡|洗头|洗完|洗了|骑车|电动车|路上|超市|买菜|快递|睡了|睡着|躺下|出门|在楼下|排队/,
-  },
-  { level: 'light', re: /看剧|刷手机|打游戏|写代码|改图|接活|改到|投简历|看书|听歌|发呆|猫|土豆/ },
+/**
+ * 忙的档位。**判据是动词，不是整句话的模式。**
+ *
+ * 这里踩过两次坑，都是同一个毛病：穷举具体搭配。
+ *   1. 只写了"洗澡"，而她的流水是"凑合洗完" → 判成不忙
+ *   2. 只写了"改图"，她说的是"改页面""三百块的活改八遍" → 判成不忙
+ *      （第二次更隐蔽：补上"改遍"之后还是漏——
+ *        因为"改"和"遍"中间夹了个"八"，模式永远追不上自然语言）
+ *
+ * 所以现在拿 status.js 解析出来的**动词**去比对。
+ * 动词是最稳的那一层："改八遍""改到第四版""改页面"都归到"改"。
+ */
+const VERB_LEVEL = {
+  // 手上占着、一时半会停不下来
+  heavy: new Set([
+    '煮', '做饭', '洗碗', '洗澡', '洗头', '洗完', '洗',
+    '出门', '下楼', '上楼', '下楼拿', '上楼拿', '排队',
+    '睡', '躺下', '躺着', '骑车', '骑', '买', '喂', '晾',
+  ]),
+  // 在做，但能看手机
+  light: new Set(['改', '写', '做', '看', '刷', '投', '收拾', '拿', '取', '吃', '喝', '调']),
+}
+
+/**
+ * 明确"这件事已经结束了"的信号。命中就不算忙。
+ *
+ * 判据刻意**又窄又自洽**：只认"吃完**了**""洗完**了**"这种
+ * 带完成补语的形态，而不是认"吃完""洗完"这两个词本身。
+ *
+ * 这个区别不是抠字眼，是被测试逼出来的：
+ *   · "凑合洗完"  ← 她的流水，意思是"我刚洗了个澡"，手上还湿着 → 算忙
+ *   · "面吃完了"  ← 明确吃完了，还说"在吃面"很怪 → 不算忙
+ * 两者的差别就在那个"了"上。按词判会自相矛盾（"洗完"既在完成表里、
+ * 又在"算忙"的动词表里），按形态判就干净了。
+ *
+ * 另外刻意**不扩大**成"一切完成态"：流水记的本来就是刚发生的事，
+ * 几乎每条都是完成态（"改了第四版""下楼拿了快递"），
+ * 那样判她永远不忙，功能等于没有。
+ */
+const DONE_MARKERS = /完了|好了/
+
+/**
+ * 兜底：动词认不出来时，再从整句里找"明确的忙碌信号"。
+ *
+ * 保留这一层是因为她有些话没有动词，
+ * 比如"土豆把纸巾刨得满地都是"——那明显是手上有事。
+ */
+const EXTRA_PATTERNS = [
+  { level: 'heavy', re: /电动车|路上|超市|买菜|快递|在楼下/ },
+  { level: 'light', re: /看剧|刷手机|打游戏|写代码|改图|接活|返工|投简历|看书|听歌|发呆|猫|土豆/ },
 ]
 
 /**
@@ -97,9 +137,31 @@ export function busyState({ at = now() } = {}) {
   // 未来时间戳（补写历史流水的时区问题）不算"正在忙"
   if (ageMs < 0 || ageMs > FRESHNESS_MS) return idle
 
-  for (const { level, re } of BUSY_PATTERNS) {
+  /*
+   * 先按**动词**定档——这是最稳的一层。
+   * "改八遍""改到第四版""改页面"都会归到"改"，
+   * 不必穷举搭配（穷举漏过两次）。
+   */
+  const { verb } = parseActivity(last.text)
+
+  /*
+   * 但明确"做完了"的就不算忙。
+   * 注意这个判断是**窄的**（只认"吃完""洗完"这种无歧义短语），
+   * 原因见 DONE_MARKERS 的注释。
+   */
+  const done = DONE_MARKERS.test(last.text)
+  if (!done) {
+    for (const level of ['heavy', 'light']) {
+      if (VERB_LEVEL[level].has(verb)) {
+        return { level, text: last.text, at: last.at, ageMs, verb }
+      }
+    }
+  }
+
+  // 动词认不出来（或者本来就没动词）时退回整句模式
+  for (const { level, re } of EXTRA_PATTERNS) {
     if (re.test(last.text)) {
-      return { level, text: last.text, at: last.at, ageMs }
+      return { level, text: last.text, at: last.at, ageMs, verb }
     }
   }
   return idle
@@ -161,4 +223,4 @@ export function busyStatus(cfg, at = now()) {
   }
 }
 
-export { FRESHNESS_MS, DELAY_RANGE, BUSY_PATTERNS }
+export { FRESHNESS_MS, DELAY_RANGE, VERB_LEVEL, EXTRA_PATTERNS }

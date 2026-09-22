@@ -10,7 +10,7 @@
  */
 import { loadConfig } from './config.js'
 import { maybeAnnounceBusy, runProactiveCheck, scheduleNextProactive } from './engine.js'
-import { liveOneRound, shouldLive } from './life.js'
+import { lastActivityAt, liveOneRound, shouldLive } from './life.js'
 import { store } from './storage.js'
 import { log, now, randInt } from './util.js'
 
@@ -43,12 +43,38 @@ export function stopScheduler() {
  *
  * 独立于主动开口：即使主动消息关着，它也应该继续生活——
  * 否则重新打开主动时它会显得"消失了一段时间"。
+ *
+ * ── 两级：正经过日子 / 背景活动 ────────────────────────
+ * 用户报过一个矛盾：顶部状态栏读的是"最近 45 分钟内有没有流水"，
+ * 而"对方正在说话时不许过日子"这条规则保证了**聊天时恰好不产生流水**——
+ * 于是"在忙"这个状态几乎永远看不到（你看到她的时候多半正在跟她说话）。
+ *
+ * 所以分两级：
+ *   · 正经过日子：等用户安静够久（原来的行为，防打断）
+ *   · 背景活动：用户正在聊，但她手上也可能真在做事（在改页面、在煮面）。
+ *     只为了让"她此刻在干嘛"有据可依，间隔放宽到 15 分钟。
  */
 async function maybeLive(cfg) {
   if (livingNow) return { skipped: '上一次生活生成还没结束' }
 
-  const verdict = shouldLive(cfg, store.state)
-  if (!verdict.ok) return { skipped: verdict.reason }
+  const at = now()
+  const background = !shouldLive(cfg, store.state, at).ok
+
+  if (background) {
+    /*
+     * 正经过日子不行，看看能不能退一格做背景活动。
+     *
+     * 间隔 15 分钟是个刻意的下限：再密就不像"过日子"、
+     * 而像在给你实时播报她在干嘛了。
+     */
+    const last = lastActivityAt()
+    const BACKGROUND_MIN_GAP = 15 * 60 * 1000
+    if (last && at - last < BACKGROUND_MIN_GAP) {
+      return { skipped: '距上次经历太近（含背景活动）' }
+    }
+    const bg = shouldLive(cfg, store.state, at, { background: true })
+    if (!bg.ok) return { skipped: bg.reason }
+  }
 
   livingNow = true
   try {
@@ -56,7 +82,7 @@ async function maybeLive(cfg) {
     const count = randInt(1, Math.max(1, cfg.life.maxPerRun))
     const result = await liveOneRound({ count })
     if (result.ok) {
-      log.info(`生活：记下 ${result.activities.length} 件事`)
+      log.info(`生活：记下 ${result.activities.length} 件事${background ? '（背景活动）' : ''}`)
 
       /*
        * 刚"经历"了要去忙的事，顺手交代一句"我去忙了"。
@@ -67,15 +93,19 @@ async function maybeLive(cfg) {
        *
        * 报备成功就跳过这一轮的主动开口：两条消息连着发很吵，
        * 而且"我去忙了"本身就是一次主动开口了。
+       *
+       * 背景活动不报备——那是"她手上在忙什么"，不是"她要走了"。
        */
-      try {
-        const announced = await maybeAnnounceBusy(cfg)
-        if (announced.sent) return { ...result, announced: true }
-      } catch (err) {
-        log.warn(`报备失败（不影响生活流水）：${err.message}`)
+      if (!background) {
+        try {
+          const announced = await maybeAnnounceBusy(cfg)
+          if (announced.sent) return { ...result, announced: true }
+        } catch (err) {
+          log.warn(`报备失败（不影响生活流水）：${err.message}`)
+        }
       }
     }
-    return result
+    return { ...result, background }
   } catch (err) {
     log.warn(`生活生成失败：${err.message}`)
     return { ok: false, reason: err.message }

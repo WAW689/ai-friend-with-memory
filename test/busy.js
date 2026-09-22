@@ -19,6 +19,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { PATHS, loadConfig } from '../src/config.js'
 import { buildBusySection, busyState, busyStatus, replyDelay } from '../src/busy.js'
+import { shortActivity } from '../src/activity.js'
 import { activeHoursGate, buildSleepySection, parseSleepWindow, sleepiness } from '../src/sleepy.js'
 import { buildBusyAnnouncePrompt, buildChatSystemPrompt } from '../src/prompts.js'
 
@@ -76,7 +77,16 @@ check('刚在煮东西 → heavy', () => {
   return s.text
 })
 
-check('刚洗完澡 → heavy', () => {
+check('刚洗完澡 → 算忙（"洗澡"本身就是 heavy）', () => {
+  /*
+   * "洗完"确实是个完成态短语，但流水里的"凑合洗完"意思是
+   * "我刚洗了个澡"——她刚从浴室出来，手上还湿着。
+   * 所以这条语气上更接近"正在收尾"，判成忙是对的。
+   *
+   * 换句话说：DONE_MARKERS 里保留"洗完"是**刻意的**争议取舍——
+   * 判成忙最多让她晚回几十秒，判成不忙则会让状态栏在她刚洗完时
+   * 显示"在的"，那反而更假。
+   */
   journalJustNow('热水器又忽冷忽热，凑合洗完')
   const s = busyState()
   assert(s.level === 'heavy', `应该 heavy，实际 ${s.level}（${s.text}）`)
@@ -90,22 +100,79 @@ check('刚才在改图 → light（能看手机的那种）', () => {
   return s.text
 })
 
-check('不判断"做完了没"——那个信号太弱，交给提示词处理', () => {
+check('认词根，不认具体搭配（"改页面""改八遍"也要认）', () => {
   /*
-   * 本来想从文本里判断"这事做完没"（有"洗完""回来"就不算忙）。
-   * 放弃了：流水记的本来就是"刚发生的事"，几乎每条都是完成态，
-   * 照那个规则判她永远不忙，功能等于没有。
-   * 现在只认时间（45 分钟内），
-   * "忙完了就正常说"这条写在提示词里。
+   * 模式表踩过两次坑，都是"只写了某一个搭配"：
+   *   1. 只写"洗澡"，她的流水是"凑合洗完" → 判成不忙
+   *   2. 只写"改图"，而她说的是"改页面""三百块的活改八遍" → 判成不忙
+   *
+   * 教训：认词根（"改"这个动作本身就够说明问题），别穷举搭配。
+   */
+  const cases = ['她在改页面', '在改页面', '调页面样式', '写页面', '做前端页面', '三百块的活改八遍']
+  for (const text of cases) {
+    journalJustNow(text)
+    const s = busyState()
+    assert(s.level !== 'idle', `「${text}」没被认成在忙`)
+  }
+  return `${cases.length} 种说法都认`
+})
+
+check('提取出的短语是完整的，不是半截（"改面"那种）', () => {
+  /*
+   * 宾语词表里**长词必须排在短词前面**——`NOUNS.find()` 取第一个命中的。
+   * 如果"面"排在"页面"前面，"改页面"会被拼成"在改面"，读起来像断了。
+   *
+   * 这里测解析出来的短语本身（不带"在"前缀），
+   * 因为"在"是状态栏拼的、不是解析器的事。
+   */
+  const cases = [
+    ['她在改页面', '改页面'],
+    ['起来煮了碗西红柿鸡蛋面', '煮面'],
+    ['下楼拿快递', '下楼拿快递'],
+    ['调页面样式', '调页面'],
+    ['写页面', '写页面'],
+  ]
+  for (const [input, expect] of cases) {
+    journalJustNow(input)
+    const st = busyState()
+    assert(st.level !== 'idle', `「${input}」没被认成在忙`)
+    assert(st.text === input, '原始文本该保留')
+    // 解析出的人类可读短语
+    assert(
+      shortActivity(input) === expect,
+      `「${input}」解析成「${shortActivity(input)}」，期望「${expect}」`,
+    )
+  }
+  return `${cases.length} 句都对`
+})
+
+check('明确"吃完了"不算忙，但"洗完"算（判据是完成补语，不是词）', () => {
+  /*
+   * 这里有个来回，两边的理由都要说清楚：
+   *
+   * · 一开始想从文本判断"这事做完没"，**放弃了**——流水记的本来就是
+   *   刚发生的事，几乎每条都是完成态（"改了第四版""下楼拿了快递"），
+   *   照那个规则判她永远不忙，功能等于没有。
+   *
+   * · 但"面吃完了，凑合"这种，说"在吃面"确实很怪。
+   *   所以加了一层**很窄的**判断：只认"完了""好了"这种明确完成补语。
+   *
+   * · 关键是**按形态判，不按词判**。按词判会自相矛盾：
+   *   "洗完"既像完成态、又是她的真实流水（意思是"我刚洗了个澡，手上还湿着"），
+   *   两边都想认就会打架。按形态判就干净了：
+   *     "面吃完**了**" → 结束了 → 不忙
+   *     "凑合洗完"     → 刚洗完、还在收尾 → 忙
+   *   这个差异是测试逼出来的，不是抠字眼。
    */
   journalJustNow('面吃完了，凑合')
-  const s = busyState()
-  // 这句话不匹配任何 busy 模式，所以是 idle（靠模式而非完成态判断）
-  assert(s.level === 'idle', `"吃完了"不该被当成在忙：${s.text}`)
+  assert(busyState().level === 'idle', `"吃完了"不该被当成在忙：${busyState().text}`)
 
   journalJustNow('凑合洗完')
-  assert(busyState().level === 'heavy', '"洗完"应该算在忙（有"洗完"这个模式）')
-  return '靠模式和时间判断，不靠完成态'
+  assert(busyState().level === 'heavy', '"洗完"应该算在忙（刚好洗完，还在收尾）')
+
+  journalJustNow('下楼拿快递')
+  assert(busyState().level === 'heavy', '"拿快递"应该算忙')
+  return '吃完「了」不算，洗完和拿快递算'
 })
 
 check('很久以前的流水不算数（她肯定早做完了）', () => {

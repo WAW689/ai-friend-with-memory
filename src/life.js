@@ -357,8 +357,12 @@ export function lastActivityAt() {
  *
  * @param {object} cfg
  * @param {{ lastUserMessageAt: number }} state
+ * @param {number} [at]
+ * @param {{background?: boolean}} [opts]
+ *   background=true 时**跳过"对方安静够久"这一条**，其余照旧。
+ *   见下面 why 的说明。
  */
-export function shouldLive(cfg, state, at = now()) {
+export function shouldLive(cfg, state, at = now(), opts = {}) {
   const life = cfg.life
   if (!life?.enabled) return { ok: false, reason: '生活功能已关闭' }
   if (!hasLife()) return { ok: false, reason: '还没有生活设定' }
@@ -373,8 +377,25 @@ export function shouldLive(cfg, state, at = now()) {
     if (inQuiet) return { ok: false, reason: '静默时段' }
   }
 
-  // 用户正在说话的时候不该"过日子"——那是打断
-  if (state.lastUserMessageAt) {
+  /*
+   * 对方正在说话的时候，默认不"过日子"——那是打断：
+   * 你刚说完话，她突然回一句"我刚刚下楼买了包烟"，很怪。
+   *
+   * ── 但这条和状态栏有个矛盾（用户报过）──────────────
+   * 顶部那行状态读的是"最近 45 分钟内有没有流水"。
+   * 而这条规则保证了**你聊天的时候她恰好不产生流水**——
+   * 于是"在忙"这个状态你几乎永远看不到：你看到她的时候，
+   * 多半正是在跟她说话的时候。
+   *
+   * 解法是区分两件事：
+   *   · **过日子**（会写流水、可能被聊天引用）→ 要等用户安静，别打断
+   *   · **背景活动**（只为了让"她此刻在干嘛"有据可依）→ 不用等
+   * 后者传 background=true。
+   *
+   * 这不会破坏"别打断"的初衷：判断她会不会在聊天里提起，
+   * 靠的是"生成那一刻用户安静不安静"，不是"历史上有没有在聊天时生成过"。
+   */
+  if (!opts.background && state.lastUserMessageAt) {
     const idleMin = (at - state.lastUserMessageAt) / 60000
     if (idleMin < life.minIdleMinutes) {
       return { ok: false, reason: `对方 ${Math.round(idleMin)} 分钟前还在说话` }

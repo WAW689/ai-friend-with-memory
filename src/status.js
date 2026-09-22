@@ -17,120 +17,17 @@
  */
 import { now } from './util.js'
 import { busyState } from './busy.js'
+import { parseActivity, shortActivity } from './activity.js'
 import { sleepiness } from './sleepy.js'
 
-/**
- * 一条流水 → 一句"她在干嘛"的短话，放在"在…"里能读通。
+/*
+ * 活动解析（parseActivity / shortActivity）**搬到了 activity.js**。
  *
- * 迭代了三轮才顺，三轮都是因为**汉语的动词短语没法靠截断得到**：
- *   1. 只取第一个分句 → "热水器又忽冷忽热"（那是环境，动作在第二句）
- *   2. 取带动作词的分句 → "起来煮了碗西红柿鸡蛋面"太长、
- *      "改到第四版"放进"在…"里不成话
- *   3. 现在的做法：**动词 + 宾语核心**
- *      "起来煮了碗西红柿鸡蛋面" → 煮 + 面 = "煮面"
- *      "刚刚下楼拿快递"         → 下楼拿 + 快递 = "下楼拿快递"
- *      "热水器忽冷忽热，凑合洗完" → 洗完
- *
- * 所以是"认动词、认宾语名词"，不是切字符串。
+ * 搬家的原因：busy.js 也要用它（按动词定档位），
+ * 而 busy.js 已经被 status.js 依赖——放在这里会成环。
+ * 现在两边都从 activity.js 取，这里只 re-export 给老调用方。
  */
-
-/** 动作词。跟 busy.js 的模式对齐，免得状态栏说的事跟她"在忙"的理由对不上。 */
-const VERBS = [
-  '下楼拿',
-  '上楼拿',
-  '下楼',
-  '上楼',
-  '出门',
-  '排队',
-  '收拾',
-  '做饭',
-  '洗碗',
-  '洗澡',
-  '洗头',
-  '洗完',
-  '躺着',
-  '躺下',
-  '睡',
-  '煮',
-  '买',
-  '拿',
-  '取',
-  '洗',
-  '吃',
-  '喝',
-  '改',
-  '写',
-  '投',
-  '刷',
-  '看',
-  '骑',
-  '晾',
-  '喂',
-]
-
-/**
- * 宾语核心词。只认这些，就是为了**避免把修饰语也带进去**——
- * "煮了碗西红柿鸡蛋面"里的"西红柿鸡蛋"是修饰，真正要说的是"面"。
- */
-const NOUNS = ['快递', '外卖', '简历', '代码', '衣服', '猫', '土豆', '饭', '面', '碗', '菜', '水', '澡', '觉', '图', '手机', '剧', '书', '车', '药', '烟', '垃圾', '地', '车票', '票']
-
-/** 量词和助词，拼短语时要丢掉 */
-const FILLER = /[了个着过碗杯盘份袋张支条只把次顿]/
-
-export function shortActivity(text, { max = 14 } = {}) {
-  const raw = String(text ?? '')
-    .replace(/^[-*•]\s*/, '')
-    // 时间词和钟点前缀都是噪音："今天""10:30"出现在状态栏里很奇怪
-    .replace(/^(今天|昨天|刚刚|刚才|早上|上午|中午|下午|晚上|夜里|凌晨)[，,]?\s*/, '')
-    .replace(/^\d{1,2}[:：]\d{2}\s*/, '')
-    .trim()
-  if (!raw) return ''
-
-  const clauses = raw
-    .split(/[，,。；;！!？?]/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-  if (clauses.length === 0) return ''
-
-  /*
-   * 先看整句里有没有"睡"。
-   * 睡觉本来就是状态，不能套"在…"——"在睡到十二点半"不成话。
-   * 而且流水里"睡"经常出现在后半句（"土豆踩我脸把我踩醒"），
-   * 只看选中的那个分句会漏掉。
-   */
-  if (/睡/.test(raw)) return '睡着了'
-
-  // 挑带动作词的分句；都没有就用第一个
-  const clause = clauses.find((c) => VERBS.some((v) => c.includes(v))) ?? clauses[0]
-
-  const verb = VERBS.find((v) => clause.includes(v))
-  if (!verb) {
-    return clause.length <= max ? clause : clause.slice(0, max)
-  }
-
-  /*
-   * 动词后面可能还跟着补语/助词（"改**到**第四版"、"走**了**"），
-   * 拼接前要先跳过去，否则会得到"在改到第"这种断在半截上的话。
-   *
-   * 注意跳过的范围比 tail 的判断更靠前：VERBS 里只有"改"没有"改到"，
-   * 所以 tail 会是"到第四版"，那个"到"得在这一步吃掉。
-   */
-  const tail = clause.slice(clause.indexOf(verb) + verb.length)
-  const afterParticle = tail.replace(/^[到完了过起来去出回住开走]+/, '')
-
-  // 在跳完虚词的部分里找宾语核心词
-  const noun = NOUNS.find((n) => afterParticle.includes(n))
-  if (noun) {
-    const phrase = `${verb}${noun}`
-    return phrase.length <= max ? phrase : verb
-  }
-
-  // 找不到认识的宾语：只取一两个字，遇到虚词开头的就不跟
-  const blocked = /^[第了的着把被给和跟对从为]/.test(afterParticle)
-  const extra = blocked ? '' : afterParticle.replace(FILLER, '').slice(0, 2)
-  const phrase = `${verb}${extra}`
-  return phrase.length <= max ? phrase : verb
-}
+export { parseActivity, shortActivity } from './activity.js'
 
 /**
  * 她现在的状态。

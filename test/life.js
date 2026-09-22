@@ -274,6 +274,62 @@ check('距上次经历太近时不触发', () => {
   return verdict.reason
 })
 
+check('background 模式跳过"对方安静够久"这一条（关键）', () => {
+  /*
+   * 这条盯的是一个用户报过的矛盾：
+   *   顶部状态栏读"最近 45 分钟内有没有流水"，
+   *   而"对方正在说话时不许过日子"保证了**聊天时恰好不产生流水**——
+   *   于是"在忙"这个状态几乎永远看不到（你看到她的时候多半正在跟她说话）。
+   *
+   * 解法是两级：正经过日子要等用户安静（防打断），
+   * 背景活动不用等——只为让"她此刻在干嘛"有据可依。
+   *
+   * 注意"防打断"的初衷没被破坏：判断她会不会在聊天里提起，
+   * 靠的是生成那一刻用户安静不安静，不是历史上有没有在聊天时生成过。
+   */
+  const anchor = quietFreeMoment()
+  reset({ journal: [{ at: anchor - 5 * HOUR, text: '旧事' }] })
+  const state = { lastUserMessageAt: anchor - 60 * 1000 } // 一分钟前刚说过话
+
+  // 默认：用户刚说过话 → 不生成
+  const normal = shouldLive(cfg, state, anchor)
+  assert(!normal.ok, '默认模式不该在用户说话时生成')
+  assert(/还在说话/.test(normal.reason), `理由不对：${normal.reason}`)
+
+  // background：跳过这一条，其余照旧
+  const bg = shouldLive(cfg, state, anchor, { background: true })
+  assert(bg.ok, `background 模式该放行，实际：${bg.reason}`)
+  return '默认拦住、background 放行'
+})
+
+check('background 模式仍然受"静默时段"和"间隔"约束', () => {
+  // 它只跳过一条，不是全放行——不然她半夜也会"过日子"
+  const night = new Date()
+  night.setHours(3, 0, 0, 0)
+  reset({ journal: [{ at: night.getTime() - 5 * HOUR, text: '旧事' }] })
+  const verdict = shouldLive(
+    cfg,
+    { lastUserMessageAt: night.getTime() - 60 * 1000 },
+    night.getTime(),
+    { background: true },
+  )
+  assert(!verdict.ok, 'background 模式不该绕过静默时段')
+  assert(/静默/.test(verdict.reason), `理由不对：${verdict.reason}`)
+
+  // 间隔太近也拦住
+  const anchor = quietFreeMoment()
+  reset({ journal: [{ at: anchor - 2 * 60 * 1000, text: '两分钟前' }] })
+  const tooSoon = shouldLive(
+    cfg,
+    { lastUserMessageAt: anchor - 60 * 1000 },
+    anchor,
+    { background: true },
+  )
+  assert(!tooSoon.ok, 'background 模式不该绕过间隔限制')
+  assert(/距上次经历/.test(tooSoon.reason), `理由不对：${tooSoon.reason}`)
+  return '静默时段和间隔都还生效'
+})
+
 check('功能关掉时不触发', () => {
   reset({ journal: [{ at: Date.now() - 10 * HOUR, text: '旧事' }] })
   const off = { ...cfg, life: { ...cfg.life, enabled: false } }
