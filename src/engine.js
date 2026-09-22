@@ -17,7 +17,10 @@ import { markStickerUsed, stickerMenu } from './stickers.js'
 import { describeNow } from './almanac.js'
 import { buildWeatherSection, getWeather, peekSunTimes } from './weather.js'
 import { buildRecallSection, dueRecalls, markAsked, pruneRecall, readRecall, addRecall } from './recall.js'
+import { buildBusySection, busyState, replyDelay } from './busy.js'
+import { activeHoursGate, buildSleepySection, sleepiness } from './sleepy.js'
 import {
+  buildBusyAnnouncePrompt,
   buildChatSystemPrompt,
   buildMemoryPrompt,
   buildProactiveDecisionPrompt,
@@ -188,6 +191,72 @@ export function stickerStats() {
   return { today: stickersToday(), lastAt: store.state.lastStickerAt ?? 0 }
 }
 
+/**
+ * 让她主动交代一句"我去忙了"。
+ *
+ * 为什么这条比延迟更有价值：真人朋友之间"我去忙了"很重要，
+ * 它把"你没回我"从"他不想理我"变成"他在忙"。
+ * 用户会因为"看到她在线没回"多想，一句报备能省掉那部分内耗。
+ *
+ * 三道闸门，都是防"报备变成刷屏"：
+ *   1. 只有 **heavy** 档（做饭、洗澡、骑车、睡觉）才报备。
+ *      "在刷手机"不用报备——那本来就是能聊天的状态。
+ *   2. 距上次报备至少 4 小时。真人不会一天报备八次。
+ *   3. 对方正在聊（10 分钟内说过话）就不单独报备，
+ *      让正常回复去交代——连着两条消息会显得很吵。
+ */
+export async function maybeAnnounceBusy(cfg = loadConfig(), { at = now() } = {}) {
+  if (cfg.busy?.enabled === false) return { sent: false, reason: '在忙功能已关闭' }
+  if (cfg.busy?.announce === false) return { sent: false, reason: '报备已关闭' }
+
+  const state = busyState({ at })
+  if (state.level !== 'heavy') {
+    return { sent: false, reason: state.level === 'light' ? '这种忙不用报备' : '她现在没在忙什么' }
+  }
+
+  const lastAnnounce = store.state.lastBusyAnnounceAt ?? 0
+  if (at - lastAnnounce < 4 * 60 * 60 * 1000) {
+    return { sent: false, reason: '四小时内已经报备过了' }
+  }
+
+  const lastUser = store.state.lastUserMessageAt ?? 0
+  if (at - lastUser < 10 * 60 * 1000) {
+    return { sent: false, reason: '对方正在聊，让正常回复去交代' }
+  }
+
+  let text = ''
+  try {
+    const ctx = buildContext(cfg)
+    text = String(
+      await complete(
+        cfg,
+        buildBusyAnnouncePrompt({ persona: ctx.persona, activity: state.text, nowText: ctx.nowText }),
+        { maxTokens: 60, temperature: cfg.model.temperature },
+      ),
+    ).trim()
+  } catch (err) {
+    log.warn(`生成报备消息失败：${err.message}`)
+    return { sent: false, reason: err.message }
+  }
+
+  // 清洗：去引号、只取第一行、限长。模型偶尔会写一整段
+  text = text
+    .replace(/^["'“「]|["'”」]$/g, '')
+    .split('\n')[0]
+    .trim()
+    .slice(0, 40)
+
+  if (text.length < 2) return { sent: false, reason: '模型没给出可用的一句话' }
+
+  const message = store.append({ role: 'assistant', text, kind: 'proactive' })
+  store.noteProactive(message.at)
+  store.state.lastBusyAnnounceAt = at
+  store.saveState()
+
+  log.info(`她报备去忙了：${text}`)
+  return { sent: true, message, text }
+}
+
 export function characterName() {
   try {
     const stat = fs.statSync(PATHS.persona)
@@ -304,12 +373,40 @@ function buildContext(cfg) {
    */
   const nowText = describeNow(new Date(), peekSunTimes())
 
+  /*
+   * 她在忙吗。判断是启发式的（看她最近一条生活流水的形态），不额外调模型。
+   *
+   * 这里只算一次、同时给三个地方用：延迟、提示词里那句交代、主动报备。
+   * 分三次算会不一致——比如延迟按"忙"算、提示词却按"不忙"给，
+   * 那她晚回了几十秒却一个字不解释，用户只会觉得卡。
+   */
+  const busy = busyState()
+
+  /*
+   * 她困不困。
+   *
+   * 她的设定里写着"凌晨三四点睡、中午前后起"，但那以前只是一句**背景描述**，
+   * 从来没影响过她说话——所以凌晨三点找她，她精神抖擞地陪你聊，
+   * 看起来像一个永远有精力的服务，而不是一个会困的人。
+   *
+   * 这里算出来注入提示词：快睡时回得更短、语气发懒；
+   * 真在睡时段被吵醒就应一声、别开新话题。注意**不拦回复**——
+   * 让她消息发不出去是服务故障，不是真人感。
+   */
+  const sleepy = sleepiness()
+
   return {
     persona: readPersona(),
     memory: readMemory(),
     summary: summary.text,
     // 完整的时间/日期/农历/节假日/昼夜描述
     nowText,
+    // 她手上正在忙的事（不忙时是空串）
+    busySection: buildBusySection(busy),
+    busy,
+    // 她的困劲儿（清醒时是空串）
+    sleepySection: buildSleepySection(sleepy),
+    sleepy,
     // 它对自己的看法（会慢慢变），还没形成时是空串
     selfSection: buildSelfSection(),
     // 它自己的生活（不在聊天时也过日子），没有流水时是空串
@@ -431,6 +528,27 @@ export async function respond(text, hooks = {}) {
     },
     ...ctx.recent.map(toModelMessage),
   ]
+
+  /*
+   * 她在忙就晚点回。
+   *
+   * 位置很关键：**放在拼完提示词之后、发请求之前**。
+   * 放前面的话用户发完消息会先干等一下才看到"正在输入"，很像卡顿；
+   * 放这里则是"消息发出去了（前端立刻显示），过一会儿她才开始打字"——
+   * 那正是真人被占用时的样子。
+   *
+   * hook 是给调用方标记状态用的（前端可以显示"她可能在忙"），
+   * 不传也不影响。
+   */
+  const delayMs = replyDelay(cfg, { state: ctx.busy })
+  if (delayMs > 0) {
+    hooks.onDelay?.(delayMs, ctx.busy)
+    log.info(`她在忙（${truncate(ctx.busy.text, 24)}），${Math.round(delayMs / 1000)} 秒后再回`)
+    await sleep(delayMs)
+    // 等待期间对方可能撤回了 / 断线了
+    if (hooks.signal?.aborted) throw new Error('已取消')
+  }
+
   store.state.generating = true
   store.saveState()
 
@@ -619,6 +737,25 @@ export async function runProactiveCheck(options = {}) {
     // 流水也记一条：闸门拦截（比如"距下次窗口还有 8 分钟"）
     if (!dryRun) recordProactiveEvent({ sent: false, reason: `[闸门] ${gate.reason}` })
     return { sent: false, reason: gate.reason }
+  }
+
+  /*
+   * 她睡觉的时候不主动找人说话。
+   *
+   * 这是四道闸门之外的第五道，跟"静默时段"不同：
+   * 静默时段是**用户配的**（"晚上 22 点到早上 7 点别打扰我"），
+   * 这道是**她自己的作息**（她一般 3 点睡、12 点起）。
+   * 两者可以不一样：用户可能允许半夜被打扰，但那时候她自己在睡。
+   *
+   * 只拦主动开口。对方先说话她还是会回——只是回得又短又困
+   * （见 sleepySection）。让她消息发不出去是服务故障，不是真人感。
+   */
+  const sleepGate = activeHoursGate(cfg, at)
+  if (!sleepGate.ok && !bypassGate) {
+    store.state.lastHoldReason = sleepGate.reason
+    store.saveState()
+    if (!dryRun) recordProactiveEvent({ sent: false, reason: `[睡觉] ${sleepGate.reason}` })
+    return { sent: false, reason: sleepGate.reason }
   }
 
   const ctx = buildContext(cfg)

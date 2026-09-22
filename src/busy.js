@@ -1,0 +1,164 @@
+/**
+ * 她在忙吗。
+ *
+ * 要解决的问题：以前你发消息她**秒回**。这恰恰是最不像真人的地方——
+ * 真朋友不会永远在线等你。而且她本来就有生活（你安静的时候她真的在过日子），
+ * 只是那条生活和聊天完全隔离，两边互不知道对方存在。
+ *
+ * 三个产出：
+ *   1. **回复延迟**：在忙就等几十秒再回，不是立刻
+ *   2. **交代一句**：她开口时会说"等下，我在煮东西"——这样延迟就不像卡顿
+ *   3. **主动报备**：她要去忙（或去睡）时，主动说一句"我去忙了"
+ *
+ * 第 3 条对用户其实最值钱：真人朋友之间这句话很重要，它把"你没回我"
+ * 从"他不想理我"变成"他在忙"。用户会因为"看到她在线没回"多想，
+ * 而一句报备能省掉那部分内耗。
+ *
+ * 判断方式是**启发式**，不额外调模型：
+ * 她最近一条生活流水如果是"正在做某件事"的形态（煮面、骑车、洗澡、写代码），
+ * 就认为还在忙；"做完了"的形态（吃完了、洗完了、睡醒了）就认为不忙。
+ *
+ * 为什么不上模型判断：每来一条消息都多调一次模型，成本和延迟都不划算，
+ * 而这件事的精度要求不高——判错了最多是"她晚回了几十秒"或者
+ * "她说自己在忙但其实没忙"，都不致命。
+ */
+import { now, randInt } from './util.js'
+import { readJournal } from './life.js'
+
+/**
+ * 忙的形态。
+ *
+ * 分两档，因为"忙多久"差别很大：
+ *   heavy  手上占着、一时半会停不下来（做饭、洗澡、骑车、睡觉）
+ *   light  在做但随时能看手机（看剧、刷手机、写代码、打游戏）
+ *
+ * 每档给一个秒数区间。数字是刻意这么选的：
+ *   - 低于 15 秒感知不到"她在忙"，那不如不延迟
+ *   - 高于 3 分钟用户会以为消息没发出去，开始怀疑服务挂了
+ */
+const BUSY_PATTERNS = [
+  {
+    level: 'heavy',
+    /*
+     * 动宾和补语两种形态都要覆盖。
+     * 踩过一次：模式里只写了"洗澡"，而她的流水是"凑合洗完"——
+     * "洗完"没匹配上，于是她明明刚洗完澡却被判成不忙。
+     */
+    re: /煮|做饭|洗碗|洗澡|洗头|洗完|洗了|骑车|电动车|路上|超市|买菜|快递|睡了|睡着|躺下|出门|在楼下|排队/,
+  },
+  { level: 'light', re: /看剧|刷手机|打游戏|写代码|改图|接活|改到|投简历|看书|听歌|发呆|猫|土豆/ },
+]
+
+/**
+ * 忙的档位 → 延迟秒数区间。
+ *
+ * 数字是刻意选的：
+ *   - 低于 10 秒感知不到"她在忙"，那不如不延迟
+ *   - 高于 3 分钟用户会以为消息没发出去，开始怀疑服务挂了
+ */
+const DELAY_RANGE = {
+  heavy: [35, 150],
+  light: [12, 60],
+}
+
+/**
+ * 同一条流水最多算它"还在忙"多久。
+ *
+ * 超过这个时间她肯定已经做完了——没见过谁拿个快递拿两小时。
+ */
+const FRESHNESS_MS = 45 * 60 * 1000
+
+/**
+ * 现在她在忙吗。
+ *
+ * ── 一个刻意放弃的判断 ──────────────────────────────
+ * 本来想从流水文本里判断"这件事做完了没"（有"洗完""吃完""回来"就不算忙）。
+ * **放弃了**，因为那个信号本身太弱：流水记的本来就是"刚发生的事"，
+ * 所以几乎每条都是完成态（"改了第四版""下楼拿了快递"），
+ * 照那个规则判，她永远不忙，功能等于没有。
+ *
+ * 时间才是可靠的信号：最近 45 分钟内有新流水 → 她多半还在做那件事。
+ * 万一她已经做完了，也不会出问题——提示词里写着
+ * "如果已经弄完了，那就正常说，不用提'我刚在忙'"，
+ * 她按实际内容自己判断就好。
+ *
+ * @param {{at?: number}} [opts]
+ * @returns {{level: 'heavy'|'light'|'idle', text: string, at: number, ageMs: number}}
+ */
+export function busyState({ at = now() } = {}) {
+  const idle = { level: 'idle', text: '', at: 0, ageMs: 0 }
+
+  const journal = readJournal()
+  if (journal.length === 0) return idle
+
+  // 只看最近一条：更早的事不能说明她现在在干什么
+  const last = journal[journal.length - 1]
+  const ageMs = at - last.at
+  // 未来时间戳（补写历史流水的时区问题）不算"正在忙"
+  if (ageMs < 0 || ageMs > FRESHNESS_MS) return idle
+
+  for (const { level, re } of BUSY_PATTERNS) {
+    if (re.test(last.text)) {
+      return { level, text: last.text, at: last.at, ageMs }
+    }
+  }
+  return idle
+}
+
+/**
+ * 这一轮该延迟多久（毫秒）。
+ *
+ * 三条硬约束，都是"别把真人感做成卡顿"：
+ *   - 从不延迟（idle）
+ *   - 上限压得比较死（最忙也就两分半），超了用户会怀疑消息没发出去
+ *   - 关掉功能就一律 0
+ *
+ * @param {object} cfg
+ * @param {{state?: object, at?: number}} [opts]
+ */
+export function replyDelay(cfg, { state, at = now() } = {}) {
+  if (cfg?.busy?.enabled === false) return 0
+
+  const s = state ?? busyState({ at })
+  if (s.level === 'idle') return 0
+
+  const [lo, hi] = DELAY_RANGE[s.level] ?? DELAY_RANGE.light
+  const seconds = randInt(lo, hi)
+  return seconds * 1000
+}
+
+/**
+ * 拼成注入提示词的那一小段。
+ *
+ * 只在真的忙时给。措辞的重点是让她**说一句交代**，
+ * 而不是变得冷淡——延迟本身用户看不见原因，一句话就把"卡顿"变成"她在忙"。
+ */
+export function buildBusySection(state) {
+  if (!state || state.level === 'idle') return ''
+
+  const minutes = Math.round((state.ageMs ?? 0) / 60000)
+  const ago = minutes < 1 ? '刚刚' : `${minutes} 分钟前`
+
+  return `【你手上正在忙的事】
+${ago}你：${state.text}
+
+你刚才在忙这个，所以看到消息晚了一点。回话的时候：
+- 如果这件事还占着手，**先交代一句再聊**（"等下，我在煮东西"、"刚骑上车"）。
+  就一句，别解释太多，也别道歉——你在过自己的日子，没什么好道歉的。
+- 如果已经弄完了，那就正常说，不用提"我刚在忙"。
+- 不要每次都说。**只在真的被打断的时候交代。**`
+}
+
+/** 给界面和 doctor 看的状态 */
+export function busyStatus(cfg, at = now()) {
+  const s = busyState({ at })
+  return {
+    level: s.level,
+    text: s.text,
+    agoMinutes: s.text ? Math.round((s.ageMs ?? 0) / 60000) : null,
+    enabled: cfg?.busy?.enabled !== false,
+    wouldDelaySeconds: Math.round(replyDelay(cfg, { state: s, at }) / 1000),
+  }
+}
+
+export { FRESHNESS_MS, DELAY_RANGE, BUSY_PATTERNS }

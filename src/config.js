@@ -276,6 +276,47 @@ const DEFAULTS = {
     // 模型没给建议天数时的兜底
     defaultAfterDays: 3,
   },
+  /*
+   * 她会不会"在忙"。
+   *
+   * 关掉就退回秒回——那是最不像真人的地方，一般不建议关。
+   * 开了之后：她在做手上的事时回复会晚几十秒，并且会先交代一句
+   * （"等下，我在煮东西"），这样延迟就不像卡顿，像她真的在过日子。
+   */
+  busy: {
+    enabled: true,
+    /*
+     * 延迟上限（秒）。默认最忙也就两分半。
+     *
+     * 这个上限不能放大：超过三分钟用户会以为消息没发出去，
+     * 开始怀疑服务挂了——那就从"真人感"变成"故障"了。
+     */
+    maxDelaySeconds: 150,
+    /*
+     * 要不要让她主动报备"我去忙了"。
+     *
+     * 这条其实比延迟更有用：它把"你没回我"从"他不想理我"
+     * 变成"他在忙"。对会因此多想的人来说，一句报备省掉很多内耗。
+     */
+    announce: true,
+  },
+  /*
+   * 她的困劲儿。
+   *
+   * 不是配"几点睡"——那个从 data/life.md 的作息里自动解析
+   * （"凌晨三四点睡，中午前后起" → 3 点睡、12 点起）。
+   * 这里只管开关。
+   */
+  sleepy: {
+    enabled: true,
+    /*
+     * 睡觉时段要不要禁止她主动开口。
+     *
+     * 开着才像真人：她真在睡，当然不会爬起来找你说话。
+     * 注意这只拦**主动**开口——你先说话她还是会回，只是回得又短又困。
+     */
+    respectInProactive: true,
+  },
 }
 
 /** 深合并：只覆盖用户显式写了的字段 */
@@ -367,6 +408,13 @@ function envOverride(cfg) {
 
   set(out.recall, 'enabled', take(['FRIEND_RECALL'], bool))
   set(out.recall, 'defaultAfterDays', take(['FRIEND_RECALL_AFTER_DAYS'], num))
+
+  set(out.busy, 'enabled', take(['FRIEND_BUSY'], bool))
+  set(out.busy, 'maxDelaySeconds', take(['FRIEND_BUSY_MAX_DELAY'], num))
+  set(out.busy, 'announce', take(['FRIEND_BUSY_ANNOUNCE'], bool))
+
+  set(out.sleepy, 'enabled', take(['FRIEND_SLEEPY'], bool))
+  set(out.sleepy, 'respectInProactive', take(['FRIEND_SLEEPY_RESPECT'], bool))
 
   return out
 }

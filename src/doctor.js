@@ -25,6 +25,8 @@ import { buildStickerSection } from './prompts.js'
 import { describeNow } from './almanac.js'
 import { describeWeather, peekSunTimes, peekWeather } from './weather.js'
 import { peekPending } from './recall.js'
+import { buildBusySection, busyState } from './busy.js'
+import { buildSleepySection, sleepiness } from './sleepy.js'
 
 /** 粗略的 token 估算：中文一个字约 1 token，英文 4 字符约 1 token */
 export function estimateTokens(text) {
@@ -70,6 +72,10 @@ export function runDoctor(cfg = loadConfig(), opts = {}) {
   const weather = opts.weather ?? peekWeather()
   const weatherText = cfg.weather?.enabled === false ? '' : describeWeather(weather)
   const pending = peekPending()
+  const busy = busyState()
+  const busySection = buildBusySection(busy)
+  const sleepy = sleepiness()
+  const sleepySection = buildSleepySection(sleepy)
 
   /**
    * 每一段：叫什么、来自哪个文件、内容、是不是"启用了但没内容"。
@@ -165,6 +171,39 @@ export function runDoctor(cfg = loadConfig(), opts = {}) {
       scope: 'proactive',
       required: false,
       emptyHint: '暂时没有该回头问的事（这是正常的）。聊天里出现"过几天该问问"的事时，会自动进这个清单。',
+    },
+    /*
+     * 下面两段是"当下状态"，不是"她是谁"。
+     * 它们大部分时候是空的——那是正常的（她不忙、不困）。
+     * 但空的时候要能看出**为什么空**，否则你会以为功能坏了。
+     */
+    {
+      id: 'busy',
+      name: '在忙（当下）',
+      source: 'data/life.jsonl 最近一条',
+      text: busySection,
+      scope: 'chat',
+      required: false,
+      emptyHint: busy.enabled === false
+        ? '在忙功能已关闭（FRIEND_BUSY=0），她会秒回。'
+        : busy.level === 'idle'
+          ? '她这会儿不忙（最近 45 分钟内没有新流水）。这是正常的——大部分时候她都没在忙。'
+          : '——',
+    },
+    {
+      id: 'sleepy',
+      name: '困劲儿（当下）',
+      source: 'data/life.md 的作息',
+      text: sleepySection,
+      scope: 'chat',
+      required: false,
+      emptyHint: cfg.sleepy?.enabled === false
+        ? '困劲儿已关闭（FRIEND_SLEEPY=0）。'
+        : sleepy.level === 0
+          ? `她这会儿清醒（作息解析成 ${sleepy.sleepHour} 点睡、${sleepy.wakeHour} 点起${
+              sleepy.parsed ? '' : '，⚠ 是从兜底值来的——data/life.md 里的作息没解析出来'
+            }）。`
+          : '——',
     },
   ]
 

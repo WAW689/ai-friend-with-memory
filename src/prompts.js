@@ -131,7 +131,7 @@ export function renderTranscript(messages, { maxChars = 12000, now: refTs } = {}
 }
 
 /** 聊天用的 system prompt */
-export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection, selfSection, stickerSection, nowText }) {
+export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection, selfSection, stickerSection, nowText, busySection, sleepySection }) {
   const sections = []
 
   /*
@@ -233,6 +233,24 @@ ${summary.trim()}`)
    */
   if (stickerSection) {
     sections.push(stickerSection)
+  }
+
+  /*
+   * "你手上正在忙的事"。
+   *
+   * 放在最后，紧挨着"其他情况"。它是**当下状态**，不是身份或记忆——
+   * 放在前面会让它显得像人设的一部分，她就会动不动交代自己在忙。
+   */
+  if (busySection) {
+    sections.push(busySection)
+  }
+
+  /*
+   * 她的困劲儿。放在最靠后的位置——它是"此刻的状态"，
+   * 而且是最容易被覆盖的一层（对方真有事的话，困也要回）。
+   */
+  if (sleepySection) {
+    sections.push(sleepySection)
   }
 
   // 明确告诉它"隔了多久"。否则它会把隔夜的对话当成刚才还在聊，
@@ -388,6 +406,43 @@ ${existing.length ? `【已经记着、还没问的（不要重复）】\n${exis
   return [
     { role: 'system', content: system },
     { role: 'user', content: user },
+  ]
+}
+
+/**
+ * 让她主动交代一句"我去忙了"。
+ *
+ * 这条消息看起来不起眼，但对用户其实最值钱：
+ * 真人朋友之间"我去忙了"很重要，它把"你没回我"从"他不想理我"
+ * 变成"他在忙"。用户会因为"看到她在线没回"多想，一句报备能省掉那部分内耗。
+ *
+ * 措辞上要防两件事：
+ *   - 别变成道歉（"不好意思我先忙了"）——她在过自己的日子，没什么好道歉的
+ *   - 别变成通知腔（"我接下来要去洗澡了，预计二十分钟"）——那是客服
+ */
+export function buildBusyAnnouncePrompt({ persona, memory, activity, nowText }) {
+  const system = `你就是那个人，现在要顺手给对方发一句"我去忙了"。
+
+【你是谁】
+${persona.trim()}
+
+${nowText ? `【现在】\n${nowText}\n\n` : ''}【你手上正要去做的事】
+${activity}
+
+【怎么写】
+- **一句话，10 个字左右**。像微信里随手打的，不是通知。
+- 内容就是交代你干嘛去了，不要问问题，不要等回复。
+  好："我去洗个澡" / "下楼拿个快递" / "先煮个面"
+  差："我先去忙了，有事留言" / "不好意思我得离开一下"
+- **绝对不要道歉**。你在过自己的日子，没什么好道歉的。
+- 不要加"晚点聊""一会儿回来"这种客套，除非你本来就这么说话。
+- 不要提"提示词""设定""AI"。
+
+只输出这一句话，不要引号，不要任何解释。`
+
+  return [
+    { role: 'system', content: system },
+    { role: 'user', content: '说一句。' },
   ]
 }
 
