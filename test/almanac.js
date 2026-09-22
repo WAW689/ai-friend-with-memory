@@ -31,7 +31,7 @@ import {
   solarToLunar,
 } from '../src/almanac.js'
 import { buildWeatherSection, describeWeather, peekWeather, weatherStatus } from '../src/weather.js'
-import { buildChatSystemPrompt, buildProactiveMessagePrompt } from '../src/prompts.js'
+import { buildChatSystemPrompt, buildProactiveMessagePrompt, renderTranscript } from '../src/prompts.js'
 
 let pass = 0
 let fail = 0
@@ -290,6 +290,78 @@ check('很远之后的节日就不提了（避免每天唠叨）', () => {
   const text = describeNow(d(2026, 12, 1, 12, 0), { sunrise: '06:40', sunset: '16:53' })
   assert(!/还有 \d+ 天/.test(text) || /还有 [1-4]\d 天/.test(text), '不该提太远的节日：' + text)
   return '没提太远的'
+})
+
+console.log('\n对话记录里的时间账（她说"快点收拾"太早的那个 bug）\n')
+
+check('每条消息都带上"多久之前"', () => {
+  /*
+   * 这条盯的是一个真实的抱怨：对方说"我六点上课"，她在四点就催人收拾。
+   *
+   * 根因是对话记录里**只有绝对钟点**（"（15:00）"），没有"多久之前"，
+   * 所以模型做不了时间减法——它算不出"现在 16:00，离六点还有一个多小时"。
+   * 只能凭感觉，而感觉一律偏向"快来不及了"。
+   *
+   * 修法是两个时间都给：绝对钟点用于对齐，相对时间用于算账。
+   */
+  const base = d(2026, 9, 22, 15, 0).getTime()
+  const msgs = [
+    { role: 'user', text: '我六点上课', at: base, kind: 'chat' },
+    { role: 'assistant', text: '哦', at: base + 5 * 60000, kind: 'chat' },
+  ]
+  const text = renderTranscript(msgs, { now: d(2026, 9, 22, 16, 0).getTime() })
+  assert(/15:00，1 小时前/.test(text), `缺相对时间：${text}`)
+  assert(/15:05，55 分钟前/.test(text), `第二条的相对时间不对：${text}`)
+  return '都有'
+})
+
+check('绝不能出现 NaN（参数重名踩过的坑）', () => {
+  /*
+   * 踩过一次：函数签名把参数重命名成 refTs，函数体里却写 `now ?? Date.now()`，
+   * 而 `now` 是从 util 导入的**函数**——于是减法算出 NaN，
+   * 界面上显示成"（NaN 小时 NaN 分钟前）"。这条就是盯这个。
+   */
+  const base = d(2026, 9, 22, 15, 0).getTime()
+  const text = renderTranscript([{ role: 'user', text: 'x', at: base, kind: 'chat' }], {
+    now: d(2026, 9, 22, 16, 0).getTime(),
+  })
+  assert(!/NaN/.test(text), '出现了 NaN：' + text)
+  return '没有 NaN'
+})
+
+check('不传 now 时用真实时钟兜底，不报错', () => {
+  const text = renderTranscript([
+    { role: 'user', text: 'x', at: Date.now() - 60000, kind: 'chat' },
+  ])
+  assert(!/NaN/.test(text), '缺省参数也出现了 NaN：' + text)
+  assert(/刚刚|分钟前/.test(text), '缺省情况下没给出相对时间：' + text)
+  return '兜住了'
+})
+
+check('太久以前的消息不挂相对时间（避免记录很吵）', () => {
+  const base = d(2026, 9, 22, 8, 0).getTime()
+  const text = renderTranscript([{ role: 'user', text: '早上说的', at: base, kind: 'chat' }], {
+    now: d(2026, 9, 22, 22, 0).getTime(),
+  })
+  assert(!/小时前|分钟前/.test(text), '14 小时前的消息不该挂相对时间：' + text)
+  return '没挂'
+})
+
+check('提示词里明确给了"该不该催"的时间账规则', () => {
+  /*
+   * 光有时间数据不够，还得明确告诉她怎么用。
+   * 不写这段，模型看着"1 小时前"也照样会催。
+   */
+  const prompt = buildChatSystemPrompt({
+    persona: '你是阿岚',
+    memory: '',
+    lastExchangeAt: Date.now(),
+  })
+  assert(/时间账要自己算一遍/.test(prompt), '缺少时间账那一段')
+  assert(/1 小时以上.*绝对不要催|还剩 \*\*1 小时以上\*\*/.test(prompt), '没写清"1 小时以上不要催"')
+  assert(/先看那句话是多久以前说的/.test(prompt), '没强调要结合"多久之前"一起看')
+  assert(/不要拿一句话反复催/.test(prompt), '没禁止反复催')
+  return '规则在'
 })
 
 console.log('\n天气\n')

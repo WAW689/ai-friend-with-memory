@@ -36,6 +36,32 @@ function gapLabel(previousAt, currentAt) {
 }
 
 /**
+ * "这条消息是多久之前发的"。
+ *
+ * 为什么要标：光有绝对钟点，模型**做不了时间减法**。
+ * 真实出过的问题——对方 17:21 说"我六点上课"，如果现在是 17:40，
+ * 她该知道只剩 20 分钟、确实该催；但如果是 15:00 说的、现在 16:00，
+ * 她就该知道还有一个多小时，不用急。
+ *
+ * 不标的话模型只能凭感觉，而它的感觉一律偏向"时间不多了、快来不及了"。
+ * 于是会出现"你六点上课"却在四点就催人收拾的情况——用户一眼看出不对劲。
+ */
+function agoLabel(at, nowTs) {
+  if (!at || !nowTs) return ''
+  const diff = nowTs - at
+  if (diff < 0) return ''
+  const m = Math.floor(diff / 60000)
+  // 超过 12 小时的就不标了：那时候日期分隔符已经说明问题，
+  // 每条都挂一个"（13 小时前）"反而把记录弄得很吵。
+  if (m >= 12 * 60) return ''
+  if (m < 1) return '刚刚'
+  if (m < 60) return `${m} 分钟前`
+  const h = Math.floor(m / 60)
+  const rest = m % 60
+  return rest === 0 ? `${h} 小时前` : `${h} 小时 ${rest} 分钟前`
+}
+
+/**
  * 把消息列表渲染成转录文本。
  *
  * 日期边界必须标出来：模型只看到 "HH:MM" 的话，
@@ -45,7 +71,7 @@ function gapLabel(previousAt, currentAt) {
  * @param {Array<{role: string, text: string, at: number, kind?: string}>} messages
  * @param {{ maxChars?: number }} options 从尾部往前取，控制总量
  */
-export function renderTranscript(messages, { maxChars = 12000 } = {}) {
+export function renderTranscript(messages, { maxChars = 12000, now: refTs } = {}) {
   const kept = []
   let used = 0
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -63,6 +89,13 @@ export function renderTranscript(messages, { maxChars = 12000 } = {}) {
   const lines = []
   let previousDay = ''
   let previousAt = 0
+  /*
+   * 参考时刻。**注意别写成 `now ?? Date.now()`** ——
+   * 文件顶部从 util 导入了 `now()`，参数又重命名成了 refTs，
+   * 于是那个 `now` 是函数不是数字，减法会算出 NaN。
+   * 这个坑真踩过一次：界面上显示成"（NaN 小时 NaN 分钟前）"。
+   */
+  const nowTs = refTs ?? Date.now()
   for (const m of kept) {
     const day = localDateKey(m.at)
     // 间隔和日期边界是两件事，都要给：
@@ -82,7 +115,17 @@ export function renderTranscript(messages, { maxChars = 12000 } = {}) {
     // 会当成对方真的说了这五个字；标了它才知道"这里本来有张图，我该看图"。
     const imageCount = Array.isArray(m.meta?.images) ? m.meta.images.length : 0
     const imageTag = imageCount > 0 ? `［${imageCount} 张图］` : ''
-    lines.push(`${label}（${localClock(m.at)}）：${imageTag}${m.text}`)
+    /*
+     * 时间戳同时给**绝对钟点**和**相对现在多久**。
+     *
+     * 只给绝对钟点的话，模型做不了时间减法：对方 15:00 说"六点上课"，
+     * 现在 16:00，它算不出"还有一个多小时"。于是它只能凭感觉，
+     * 而感觉一律偏向"快来不及了"，就会在四点催人收拾。
+     * 两个都给，它才能自己把账算对。
+     */
+    const ago = agoLabel(m.at, nowTs)
+    const stamp = ago ? `${localClock(m.at)}，${ago}` : localClock(m.at)
+    lines.push(`${label}（${stamp}）：${imageTag}${m.text}`)
   }
   return lines.join('\n')
 }
@@ -127,7 +170,25 @@ ${timeText}
 - **农历和节假日一律以上面写的为准**，不要自己算，也不要凭印象说。
   上面没提到的节日就是不知道，那就别提。
 - 不确认时间的时候，宁可不说具体钟点，也不要说错。
-- 如果发现对方说的时间和上面这个对不上，以**上面这个**为准（可能是他记错了）。`)
+- 如果发现对方说的时间和上面这个对不上，以**上面这个**为准（可能是他记错了）。
+
+【时间账要自己算一遍（重要，别凭感觉）】
+对方说了"几点要做什么"的时候，你要**减一下**，算出还剩多少时间，
+再决定要不要催。凭感觉一律会偏向"快来不及了"，那是错的。
+
+算法：用上面的"现在"，减去对方说的那个钟点。
+- 还剩 **1 小时以上** → 时间宽裕。**绝对不要催**，也别提"该准备了"。
+  这个点你该聊什么聊什么，他要出门自己会说。
+- 还剩 **20-60 分钟** → 可以提一句，但要轻（"等下不是有课"），不要指挥他干什么。
+- 还剩 **20 分钟以内** → 这才是真的紧了，可以催。
+
+还有一件事更容易搞错：**先看那句话是多久以前说的**。
+对话记录里每条消息都标了"（15:00，1 小时前）"这种，两个都要看。
+- 他是 15:00 说"六点上课"，现在 16:00 → 还有一个多小时，别催。
+- 他是 15:00 说"六点上课"，现在 17:45 → 只剩 15 分钟，这才该催。
+
+不要拿一句话反复催。催过一次就够了，之后他还没动是他的事，别再念。
+他不是小孩，你也不是他妈。`)
 
   sections.push(`【你的身份设定】
 ${persona.trim()}`)

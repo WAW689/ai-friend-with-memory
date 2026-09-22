@@ -311,7 +311,7 @@ function buildContext(cfg) {
     recent,
     lastUserMessageAt: lastUser?.at ?? 0,
     lastAssistantMessageAt: lastAssistant?.at ?? 0,
-    transcript: renderTranscript(recent),
+    transcript: renderTranscript(recent, { now: now() }),
   }
 }
 
@@ -1065,7 +1065,7 @@ function maybeEvolveSelf(cfg) {
   if (!due || !cooled) return
 
   const experiences = renderExperiences(journalSince(seenAt))
-  const transcript = renderTranscript(store.recent(40), { maxChars: 9000 })
+  const transcript = renderTranscript(store.recent(40), { maxChars: 9000, now: now() })
   if (!experiences.trim() && !transcript.trim()) return
 
   bg.lastSelfCheckAt = now()
@@ -1162,7 +1162,7 @@ function scheduleBackgroundWork(cfg) {
 /** 让模型更新长期记忆档案 */
 export async function extractMemory(cfg = loadConfig()) {
   const existing = readMemory()
-  const transcript = renderTranscript(store.recent(40), { maxChars: 9000 })
+  const transcript = renderTranscript(store.recent(40), { maxChars: 9000, now: now() })
   if (!transcript) return { updated: false, reason: '没有可用对话' }
 
   const text = await complete(cfg, buildMemoryPrompt({ existingMemory: existing, transcript }), { maxTokens: 800 })
@@ -1185,7 +1185,7 @@ export async function rollSummary(cfg = loadConfig()) {
   if (toCompress.length < 10) return { updated: false, reason: '待压缩内容太少' }
 
   const previous = readSummary()
-  const transcript = renderTranscript(toCompress, { maxChars: 14000 })
+  const transcript = renderTranscript(toCompress, { maxChars: 14000, now: now() })
   const text = await complete(cfg, buildSummaryPrompt({ previousSummary: previous.text, transcript }), { maxTokens: 600 })
   const cleaned = text.trim()
   if (!cleaned) return { updated: false, reason: '模型返回空摘要' }
