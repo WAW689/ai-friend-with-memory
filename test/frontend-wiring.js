@@ -94,6 +94,28 @@ const animationChecks = [
   ['SSE 新消息带上旧游标', /const previousLastSeq = S\.lastSeq/.test(js)],
 ]
 
+// 她的变化（会变的自我）
+//
+// 这个面板存在的意义就是"她改自己时你看得见"。少一个入口，
+// 这个功能就从"可控的成长"变成"你查不出原因的性格漂移"。
+const selfChecks = [
+  ['HTML 有「她的变化」标签', /data-tab="self"/.test(html)],
+  ['JS 有 self 分支的渲染', /tab === 'self'/.test(js)],
+  ['JS 能编辑 self.md', /textArea\('self'/.test(js)],
+  ['JS 有变更流水列表', /change-list/.test(js)],
+  ['JS 展示新增行', /change-line add/.test(js)],
+  ['JS 展示删掉的行', /change-line del/.test(js)],
+  ['JS 单独拉 /api/self', /api\('\/api\/self'\)/.test(js)],
+  ['JS 拉变更流水', /api\/self\/changes/.test(js)],
+  ['JS 有"立刻让她想一次"按钮', /btn-self-evolve/.test(js)],
+  ['JS 有"退回上一版"按钮', /btn-self-restore/.test(js)],
+  ['保存走 PUT /api/self', /api\('\/api\/self', \{ method: 'PUT'/.test(js)],
+  ['打开面板时自动加载', /void loadSelf\(\)/.test(js)],
+  ['CSS 有 .change-list', /\.change-list\s*\{/.test(css)],
+  ['CSS 有增删两色', /\.change-line\.add\s*\{/.test(css) && /\.change-line\.del\s*\{/.test(css)],
+  ['关闭成长时界面会提示', /成长功能已关闭/.test(js)],
+]
+
 let failed = 0
 for (const [name, ok] of checks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
@@ -120,6 +142,12 @@ for (const [name, ok] of layoutChecks) {
 
 console.log('\n发送动画')
 for (const [name, ok] of animationChecks) {
+  console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
+  if (!ok) failed++
+}
+
+console.log('\n她的变化')
+for (const [name, ok] of selfChecks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
   if (!ok) failed++
 }

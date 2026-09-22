@@ -11,7 +11,8 @@ import { complete, completeJson, extractJson, streamChat } from './llm.js'
 import { push, recordPush } from './bark.js'
 import { runBackup } from './backup.js'
 import { readRecentImages, saveImage } from './images.js'
-import { buildLifeSection, readJournal, shouldLive, liveOneRound } from './life.js'
+import { buildLifeSection, journalSince, readJournal, shouldLive, liveOneRound } from './life.js'
+import { buildSelfSection, evolveSelf, renderExperiences } from './self.js'
 import {
   buildChatSystemPrompt,
   buildMemoryPrompt,
@@ -141,6 +142,8 @@ function buildContext(cfg) {
     persona: readPersona(),
     memory: readMemory(),
     summary: summary.text,
+    // 它对自己的看法（会慢慢变），还没形成时是空串
+    selfSection: buildSelfSection(),
     // 它自己的生活（不在聊天时也过日子），没有流水时是空串
     lifeSection: buildLifeSection(),
     recent,
@@ -545,6 +548,14 @@ async function generateProactiveMessages(cfg, ctx, mood) {
     unansweredStreak: store.state.unansweredStreak,
     todayCount: store.proactiveCountToday(at),
     mood,
+    /*
+     * 这两段原来漏传了——buildProactiveMessagePrompt 的签名里收，
+     * 但调用处没给，所以它主动开口时**看不见自己的生活和自我认知**，
+     * 只能靠聊天记录瞎猜。主动消息比回复更容易"没话找话"，
+     * 恰恰最需要这两份材料。
+     */
+    selfSection: ctx.selfSection,
+    lifeSection: ctx.lifeSection,
   })
 
   try {
@@ -707,6 +718,8 @@ const bg = {
   summaryInFlight: false,
   lastBackupDay: '',
   backupInFlight: false,
+  lastSelfCheckAt: 0,
+  selfInFlight: false,
 }
 
 /** 摘要在覆盖这么多条新消息之前不再重算 */
@@ -716,8 +729,96 @@ const SUMMARY_MIN_INTERVAL_MS = 10 * 60 * 1000
 /** 两次记忆抽取之间至少隔这么久 */
 const MEMORY_MIN_INTERVAL_MS = 5 * 60 * 1000
 
+/* ------------------------------------------------------------ 她在长大 */
+
+/**
+ * 她会慢慢改变对自己的看法。
+ *
+ * **由经历触发，不由时间触发。** 这是这个功能的核心：
+ * 真人不会因为"过了一天"就想通什么事，是因为**遇到了什么**才想通。
+ * 所以这里不问"多久没长了"，而是问"她又经历了多少新东西"：
+ *
+ *   - 她自己过了若干段日子（日志新增 cfg.self.evolveAfterExperiences 条）
+ *   - 或者你们聊了若干条新消息（cfg.self.evolveAfterMessages 条）
+ *
+ * 两条任满足就去看一眼。**看了不代表会改**——提示词里明确允许它
+ * 原样返回。什么都没发生的话，聊 200 条她也不变。
+ *
+ * minCheckIntervalMs 不是成长频率，是防抖：没有它，连发 12 条消息
+ * 就会触发一次模型调用。
+ *
+ * 游标存在 state.json 里（落盘），所以重启不会让它重复消化同一段经历，
+ * 也不会因为重启就"白捡一次成长"。
+ */
+function maybeEvolveSelf(cfg) {
+  if (!cfg.self?.enabled) return
+  if (bg.selfInFlight) return
+
+  const total = store.messages.length
+  const seenAt = store.state.selfSeenAt ?? 0
+
+  /*
+   * 第一次运行：把游标对齐到"现在"。
+   *
+   * 不对齐的话，一个已经聊了几百条、生活流水也写了不少的存量用户，
+   * 升级后第一次对话就会把全部历史当成"新经历"喂进去——
+   * 那可能一次性消化掉几个月的事，长出一个莫名其妙的人。
+   * 成长从现在开始，不追溯。
+   */
+  if (!seenAt) {
+    store.state.selfSeenAt = now()
+    store.state.selfSeenMessages = total
+    store.saveState()
+    return
+  }
+
+  const newExperiences = journalSince(seenAt).length
+  const newMessages = total - (store.state.selfSeenMessages ?? total)
+
+  const due =
+    newExperiences >= cfg.self.evolveAfterExperiences ||
+    newMessages >= cfg.self.evolveAfterMessages
+  const cooled = now() - (bg.lastSelfCheckAt ?? 0) >= cfg.self.minCheckIntervalMs
+  if (!due || !cooled) return
+
+  const experiences = renderExperiences(journalSince(seenAt))
+  const transcript = renderTranscript(store.recent(40), { maxChars: 9000 })
+  if (!experiences.trim() && !transcript.trim()) return
+
+  bg.lastSelfCheckAt = now()
+  bg.selfInFlight = true
+
+  void evolveSelf(cfg, { experiences, transcript })
+    .then((r) => {
+      /*
+       * 游标只在**看过之后**才推进，而且不管改没改都推进。
+       *
+       * 改没改都要推进是刻意的：如果只在"改了"的时候推进，
+       * 那么一段没什么可内化的经历会被反复喂进去，每次都想找点东西改，
+       * 最后逼出一堆为了改而改的废话。
+       */
+      store.state.selfSeenAt = now()
+      store.state.selfSeenMessages = total
+      store.saveState()
+
+      if (r.updated) {
+        log.info(`她经历了一些事，对自己有了新的想法（+${r.added?.length ?? 0} / -${r.removed?.length ?? 0} 行）`)
+      } else {
+        log.info(`她经历了一些事，但没什么改变看法的：${r.reason}`)
+      }
+    })
+    .catch((err) => log.warn(`自我更新失败：${err.message}`))
+    .finally(() => {
+      bg.selfInFlight = false
+    })
+}
+
 function scheduleBackgroundWork(cfg) {
   const total = store.messages.length
+
+  /* ---------- 她的成长 ---------- */
+  // 放在最前面：它最贵也最慢，让它先排上队
+  maybeEvolveSelf(cfg)
 
   /* ---------- 记忆抽取 ---------- */
   const memoryDue = total - store.state.memoryCursor >= cfg.memory.extractEveryMessages

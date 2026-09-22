@@ -4,6 +4,16 @@ import path from 'node:path'
 const SKIP_DIRS = new Set(['node_modules', '.git', 'data', 'backups', 'logs', '.dsh'])
 const EXTS = new Set(['.js', '.mjs', '.json', '.md', '.txt', '.yml', '.yaml', '.ps1', '.cmd', '.html', '.css', '.svg', '.webmanifest', '.example'])
 
+/*
+ * 没有扩展名的文件也要查。
+ *
+ * 这个漏过一次：.env.example 就是双重编码的（原始 UTF-8 中文被当成 GBK
+ * 解读后又存成 UTF-8），但因为 ".env.example" 被 path.extname 认成
+ * 扩展名 ".example"、而它又不在白名单里，扫了 57 个文件一个都没报。
+ * 所以这里改成"按内容判断是不是文本"，而不是靠扩展名列表。
+ */
+const ALWAYS_CHECK = new Set(['.gitignore', '.gitattributes', '.env', '.env.example', '.editorconfig', '.npmrc'])
+
 const bad = []
 const crlfFiles = []
 const bomFiles = []
@@ -17,9 +27,14 @@ function walk(dir) {
       continue
     }
     const ext = path.extname(it.name).toLowerCase()
-    if (!EXTS.has(ext) && it.name !== '.gitignore' && it.name !== '.gitattributes') continue
+    const keep = EXTS.has(ext) || ALWAYS_CHECK.has(it.name) || it.name.startsWith('.')
+    if (!keep) continue
 
     const b = fs.readFileSync(p)
+
+    // 二进制文件（图片等）跳过，不然会被误报成"非 UTF-8"
+    if (b.includes(0)) continue
+
     checked++
 
     let ok = true

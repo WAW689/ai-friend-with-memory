@@ -14,6 +14,11 @@ const S = {
   avatar: { kind: 'none', value: '' },
   memory: '',
   summary: { text: '', upToSeq: 0 },
+  // 她会变的那一层自我
+  self: '',
+  selfChanges: [],
+  selfSnapshots: [],
+  selfEnabled: true,
   readiness: [],
   lastSeq: 0,
   streaming: false,
@@ -507,6 +512,8 @@ async function loadApp() {
   S.characterName = data.characterName || '朋友'
   S.avatar = data.avatar || { kind: 'none', value: '' }
   S.memory = data.memory
+  S.self = data.self ?? ''
+  S.selfEnabled = data.selfEnabled !== false
   S.summary = data.summary
   S.readiness = data.readiness
   hideGate()
@@ -1155,6 +1162,73 @@ function buildSettings(tab) {
     )
   }
 
+  if (tab === 'self') {
+    /*
+     * 「她的变化」——这个面板本身就是这个功能的一部分。
+     *
+     * 一个会自己改自己、你完全看不见的东西，跑偏了你只会觉得
+     * "她怎么变了"，查不出是哪一步变的。所以这里三件事都要有：
+     * 能看她现在怎么想自己、能看她改过什么、能退回上一版。
+     */
+    const changes = S.selfChanges ?? []
+    const changeBox = document.createElement('div')
+    changeBox.className = 'field'
+    changeBox.append(label(`她改过自己什么（最近 ${changes.length} 次）`))
+
+    if (changes.length === 0) {
+      changeBox.append(hint('还没有改过。她在聊天之外经历了一些事之后，会自己更新对自己的看法。'))
+    } else {
+      const list = document.createElement('div')
+      list.className = 'change-list'
+      for (const c of changes.slice(0, 8)) {
+        const row = document.createElement('div')
+        row.className = 'change-row'
+        const when = document.createElement('div')
+        when.className = 'change-when'
+        when.textContent = `${fmtTime(c.at)}${c.reason ? ' · ' + c.reason : ''}`
+        row.append(when)
+        for (const t of c.added ?? []) {
+          const line = document.createElement('div')
+          line.className = 'change-line add'
+          line.textContent = '+ ' + t
+          row.append(line)
+        }
+        for (const t of c.removed ?? []) {
+          const line = document.createElement('div')
+          line.className = 'change-line del'
+          line.textContent = '− ' + t
+          row.append(line)
+        }
+        if (!(c.added ?? []).length && !(c.removed ?? []).length) {
+          const line = document.createElement('div')
+          line.className = 'change-line'
+          line.textContent = '（措辞有调整）'
+          row.append(line)
+        }
+        list.append(row)
+      }
+      changeBox.append(list)
+    }
+
+    const statusLine = document.createElement('div')
+    statusLine.className = 'hint'
+    statusLine.textContent = S.selfEnabled === false
+      ? '⚠ 成长功能已关闭（FRIEND_SELF=0），她不会自己变了。'
+      : `快照 ${(S.selfSnapshots ?? []).length} 份，可随时退回。`
+
+    body.replaceChildren(
+      field('她怎么看待自己（她自己会改这一段）', textArea('self', S.self, true)),
+      hint(
+        '这是她自己慢慢形成的想法，改完保存立刻生效。' +
+          '她的"说话方式"不在这里——那属于人设，锁死的。' +
+          '所以不管她怎么长，都不会变成另一个人。',
+      ),
+      changeBox,
+      statusLine,
+      actionBlock('立刻让她想一次', '拿最近的经历和对话跑一次，看她有没有新的想法', 'btn-self-evolve', '退回上一版', 'btn-self-restore'),
+    )
+  }
+
   if (tab === 'memory') {
     const summaryBox = document.createElement('div')
     summaryBox.className = 'field'
@@ -1213,6 +1287,10 @@ async function saveSettings() {
       const memory = $('memory').value
       await api('/api/memory', { method: 'PUT', body: { memory } })
       S.memory = memory
+    } else if (S.activeTab === 'self') {
+      const self = $('self').value
+      const r = await api('/api/self', { method: 'PUT', body: { self } })
+      S.self = r.self
     } else if (S.activeTab === 'proactive') {
       const patch = {
         proactive: {
@@ -1401,6 +1479,43 @@ function openSheet(tab) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === S.activeTab))
   buildSettings(S.activeTab)
   $('sheet').classList.remove('hidden')
+
+  /*
+   * 「她的变化」的内容单独拉，不塞进 /api/app。
+   *
+   * 理由：变更流水和快照列表只在这个面板里用得到，塞进首屏那个
+   * 每次打开网页都要走的接口里是浪费。先渲染再补齐，
+   * 所以点开时不会卡一下白屏。
+   */
+  if (S.activeTab === 'self') {
+    void loadSelf().then(() => {
+      if (S.activeTab === 'self') buildSettings('self')
+    })
+  }
+}
+
+/** 拉她的自我：当前内容 + 变更流水 + 快照列表 */
+async function loadSelf() {
+  try {
+    const [selfData, changesData] = await Promise.all([
+      api('/api/self'),
+      api('/api/self/changes?limit=20'),
+    ])
+    S.self = selfData.self
+    S.selfSnapshots = selfData.snapshots ?? []
+    S.selfEnabled = selfData.enabled
+    S.selfChanges = changesData.changes ?? []
+  } catch (err) {
+    toast(`读她的变化失败：${err.message}`)
+  }
+}
+
+/** 变更流水里的时间戳 → 好读的短格式 */
+function fmtTime(at) {
+  if (!at) return ''
+  const d = new Date(at)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 function closeSheet() {
@@ -1542,6 +1657,27 @@ function wireEvents() {
       } else if (id === 'btn-summary') {
         const r = await api('/api/summary/roll', { method: 'POST' })
         showActionResult(Boolean(r.updated), r.updated ? `已压缩到第 ${r.upToSeq} 条` : `没压缩：${r.reason}`)
+      } else if (id === 'btn-self-evolve') {
+        const r = await api('/api/self/evolve', { method: 'POST' })
+        S.self = r.self
+        $('self').value = r.self
+        await loadSelf()
+        showActionResult(
+          Boolean(r.updated),
+          r.updated
+            ? `她想通了点什么：${(r.added ?? []).map((t) => '「' + t + '」').join('') || '（措辞有调整）'}`
+            : `没变：${r.reason}`,
+        )
+      } else if (id === 'btn-self-restore') {
+        const r = await api('/api/self/restore', { method: 'POST' })
+        if (r.updated) {
+          S.self = r.self
+          $('self').value = r.self
+          await loadSelf()
+          showActionResult(true, `已退回 ${r.restoredFrom}`)
+        } else {
+          showActionResult(false, `退不了：${r.reason}`)
+        }
       }
     } catch (err) {
       showActionResult(false, err.message)

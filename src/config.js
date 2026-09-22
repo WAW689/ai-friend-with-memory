@@ -39,6 +39,10 @@ export const PATHS = {
   life: path.join(DATA_DIR, 'life.md'),
   journal: path.join(DATA_DIR, 'life.jsonl'),
   lifeArcs: path.join(DATA_DIR, 'life-arcs.json'),
+  // 它会变的自我（怎么看待自己），跟 persona.md（是谁，锁死）分开
+  self: path.join(DATA_DIR, 'self.md'),
+  selfSnapshots: path.join(DATA_DIR, 'self-snapshots'),
+  selfChangelog: path.join(DATA_DIR, 'self-changelog.jsonl'),
   public: path.join(ROOT, 'public'),
 }
 
@@ -93,6 +97,29 @@ export const DEFAULT_MEMORY = `# 关于对方，我知道的事
 ## 最近在意的事
 
 ## 雷区与偏好
+`
+
+/**
+ * 出厂默认的"她怎么看待自己"。
+ *
+ * 刻意留空——**她的自我是长出来的，不是发下来的**。
+ * 一开始就写满"我觉得我挺怕接电话的"，那是设定，不是成长；
+ * 而且会让第一次更新时的对比失真（模型会以为这些是它自己写的）。
+ *
+ * 结构留着，让它知道往哪三个方向长：
+ *   - 我最近发现的事  关于自己的新觉察
+ *   - 我现在的看法    对工作、对家里、对你们关系的态度
+ *   - 我最近的样子    最近的状态和在意的东西
+ */
+export const DEFAULT_SELF = `# 我对自己的一些想法
+
+（这些是我自己慢慢想明白的，不是谁给我定的。会变。）
+
+## 我最近发现的事
+
+## 我现在的看法
+
+## 我最近的样子
 `
 
 const DEFAULTS = {
@@ -163,6 +190,36 @@ const DEFAULTS = {
     maxGapMinutes: 240,
     // 每次最多几件事
     maxPerRun: 2,
+  },
+  // 她会变的自我（怎么看待自己）
+  self: {
+    // 关掉就完全不长——她的想法会一直停在 self.md 当前内容
+    enabled: true,
+    /*
+     * 成长由**经历**触发，不是按时间排期。
+     *
+     * 这是刻意的：真人不会因为"过了一天"就想通什么事，
+     * 是因为**遇到了什么**才想通。所以门限都按"攒了多少新东西"算：
+     *
+     *   - 她自己过了 6 段日子（日志新增 6 条）
+     *   - 或者你们聊了 12 条新消息
+     *
+     * 任一条满足就去看一眼"这些事有没有让她对自己有新的认识"。
+     * 如果什么都没发生，就算聊了 200 条她也不会变——
+     * 提示词里明确允许它返回原文。
+     */
+    evolveAfterExperiences: 6,
+    evolveAfterMessages: 12,
+    /*
+     * 两次检查之间的硬下限。
+     *
+     * 这个**不是**成长频率，是防抖：没有它的话，
+     * 你连发 12 条消息就会触发一次模型调用。
+     * 20 分钟足够让"连续输入"合并成一次真正的经历。
+     */
+    minCheckIntervalMs: 20 * 60 * 1000,
+    // 一次最多改几行。超过就整次拒绝——一次换一个人不叫成长。
+    maxChangedLines: 3,
   },
 }
 
@@ -240,6 +297,11 @@ function envOverride(cfg) {
   set(out.life, 'minGapMinutes', take(['FRIEND_LIFE_MIN_GAP'], num))
   set(out.life, 'maxGapMinutes', take(['FRIEND_LIFE_MAX_GAP'], num))
 
+  set(out.self, 'enabled', take(['FRIEND_SELF'], bool))
+  set(out.self, 'evolveAfterExperiences', take(['FRIEND_SELF_AFTER_EXPERIENCES'], num))
+  set(out.self, 'evolveAfterMessages', take(['FRIEND_SELF_AFTER_MESSAGES'], num))
+  set(out.self, 'maxChangedLines', take(['FRIEND_SELF_MAX_LINES'], num))
+
   return out
 }
 
@@ -254,6 +316,11 @@ function bootstrapFiles() {
   }
   if (!fs.existsSync(PATHS.messages)) {
     fs.writeFileSync(PATHS.messages, '', 'utf8')
+  }
+  // 她的自我：只建一次，之后由她和用户共同维护，绝不覆盖
+  if (!fs.existsSync(PATHS.self)) {
+    fs.writeFileSync(PATHS.self, DEFAULT_SELF, 'utf8')
+    log.info('已创建 data/self.md（她对自己的看法，会自己慢慢变）')
   }
 }
 

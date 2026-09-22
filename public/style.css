@@ -662,6 +662,39 @@ button:disabled { opacity: 0.45; }
 .result.ok { background: rgba(52, 211, 153, 0.12); color: #34d399; }
 .result.bad { background: rgba(239, 68, 68, 0.12); color: var(--danger); }
 
+/* ------------------------------------------------------ 她的变化（变更流水） */
+
+/*
+ * 展示"她改了自己什么"。用增删两色，一眼能看出是长出了新想法
+ * 还是把旧想法推翻/改写了——后者往往更值得注意。
+ */
+.change-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.change-row {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.change-when {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.change-line { word-break: break-word; }
+.change-line.add { color: #34d399; }
+.change-line.del { color: var(--danger); opacity: 0.85; }
+
 /* ------------------------------------------------------------------ Toast */
 
 .toast {

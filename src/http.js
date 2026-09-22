@@ -41,6 +41,15 @@ import {
   writePersona,
 } from './engine.js'
 import { verifyKey } from './llm.js'
+import { renderTranscript } from './prompts.js'
+import {
+  evolveSelf,
+  listSnapshots,
+  readSelf,
+  readSelfChanges,
+  replaceSelf,
+  restoreSelf,
+} from './self.js'
 import { store, toWireMessage } from './storage.js'
 import { appendJsonl, log, now, truncate } from './util.js'
 
@@ -235,6 +244,9 @@ async function handleApi(req, res, url, cfg) {
         characterName: characterName(),
         avatar: readAvatar(),
         memory: readMemory(),
+        // 她怎么看待自己（会变的那一层）。流水和快照列表在 /api/self 里单独拉。
+        self: readSelf(),
+        selfEnabled: cfg.self?.enabled !== false,
         summary: readSummary(),
         readiness: checkReadiness(cfg),
         serverTime: now(),
@@ -487,6 +499,54 @@ async function handleApi(req, res, url, cfg) {
       const body = await readBody(req)
       writePersona(String(body.persona ?? ''))
       return sendJson(res, 200, { ok: true, persona: readPersona() })
+    }
+
+    /* ---------------- 她的自我（会变的那一层） ---------------- */
+    /*
+     * 这几个接口的存在本身就是这个功能的一部分。
+     *
+     * "会自己改自己"最大的风险不是改坏，而是**改了你不知道**。
+     * 所以除了读和写，还要能看变更流水、能看历史快照、能回退。
+     * 没有这些，她跑偏了你只会觉得"她怎么变了"，查不出是哪一步变的。
+     */
+    case 'GET /api/self':
+      return sendJson(res, 200, {
+        self: readSelf(),
+        enabled: cfg.self?.enabled !== false,
+        snapshots: listSnapshots().slice(0, 30).map((s) => s.name),
+      })
+
+    case 'PUT /api/self': {
+      const body = await readBody(req)
+      const result = replaceSelf(String(body.self ?? ''))
+      return sendJson(res, 200, { ok: true, ...result, self: readSelf() })
+    }
+
+    /** 她改过自己什么（新的在前） */
+    case 'GET /api/self/changes': {
+      const limit = Math.min(200, Number(url.searchParams.get('limit')) || 50)
+      return sendJson(res, 200, { changes: readSelfChanges(limit) })
+    }
+
+    /** 回退。不传 name 就退到上一个快照。 */
+    case 'POST /api/self/restore': {
+      const body = await readBody(req)
+      const result = restoreSelf(body.name ? String(body.name) : undefined)
+      return sendJson(res, 200, { ok: true, ...result, self: readSelf() })
+    }
+
+    /** 立刻让她更新一次（调试/手动用） */
+    case 'POST /api/self/evolve': {
+      if (cfg.self?.enabled === false) {
+        return sendJson(res, 200, { updated: false, reason: '成长功能已关闭' })
+      }
+      const body = await readBody(req).catch(() => ({}))
+      const transcript =
+        typeof body.transcript === 'string' && body.transcript.trim()
+          ? body.transcript
+          : renderTranscript(store.recent(40), { maxChars: 9000 })
+      const result = await evolveSelf(cfg, { transcript })
+      return sendJson(res, 200, { ...result, self: readSelf() })
     }
 
     /* ---------------- 记忆 ---------------- */

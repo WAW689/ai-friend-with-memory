@@ -86,6 +86,16 @@ export function recentJournal(n = RECENT_FOR_CHAT) {
   return all.slice(-n).reverse()
 }
 
+/**
+ * 某个时刻之后新发生的经历（按时间正序）。
+ *
+ * 给"她的成长"用的：判断这一段她有没有经历值得内化的事。
+ * after 传 0 就返回全部。
+ */
+export function journalSince(after = 0) {
+  return readJournal().filter((e) => e.at > after)
+}
+
 /** 记一件事 */
 export function recordActivity({ at, text, kind = 'activity' }) {
   const entry = { at: at ?? now(), text: String(text ?? '').trim(), kind }

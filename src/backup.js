@@ -76,6 +76,16 @@ export function runBackup(options = {}) {
     ['life.md', PATHS.life],
     ['life-arcs.json', PATHS.lifeArcs],
     ['life.jsonl', PATHS.journal],
+    /*
+     * 她怎么看待自己。
+     *
+     * 这个比 life.jsonl 更该备份：它是**唯一一份会自动改写**的设定。
+     * 流水是追加的，写坏了顶多丢几行；self.md 是整体覆盖写的，
+     * 一旦长歪了又没有历史版本，就只能眼睁睁看着。
+     * 变更流水也带上——那是"她是怎么一步步变成现在这样"的记录。
+     */
+    ['self.md', PATHS.self],
+    ['self-changelog.jsonl', PATHS.selfChangelog],
   ]
   for (const [name, source] of plainFiles) {
     if (!fs.existsSync(source)) continue
@@ -87,6 +97,32 @@ export function runBackup(options = {}) {
     } catch (err) {
       log.warn(`备份 ${name} 失败：${err.message}`)
     }
+  }
+
+  /*
+   * 她的自我快照目录（多个 .md）。
+   *
+   * 这是"回退任意一版"的底料，比当前版本更值钱——
+   * self.md 只有现在，快照里有她这一路的样子。
+   */
+  try {
+    if (fs.existsSync(PATHS.selfSnapshots)) {
+      const names = fs.readdirSync(PATHS.selfSnapshots).filter((f) => f.endsWith('.md'))
+      if (names.length) {
+        const snapDir = path.join(dir, 'self-snapshots')
+        fs.mkdirSync(snapDir, { recursive: true })
+        let snapBytes = 0
+        for (const n of names) {
+          const content = fs.readFileSync(path.join(PATHS.selfSnapshots, n), 'utf8')
+          fs.writeFileSync(path.join(snapDir, n), content, 'utf8')
+          snapBytes += Buffer.byteLength(content)
+        }
+        copied.push({ file: `self-snapshots/（${names.length} 份）`, bytes: snapBytes })
+        bytes += snapBytes
+      }
+    }
+  } catch (err) {
+    log.warn(`备份自我快照失败：${err.message}`)
   }
 
   writeJsonAtomic(marker, {
