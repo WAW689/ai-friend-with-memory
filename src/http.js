@@ -37,6 +37,7 @@ import {
   rollSummary,
   runProactiveCheck,
   scheduleNextProactive,
+  stickerStats,
   writeMemory,
   writePersona,
 } from './engine.js'
@@ -55,7 +56,6 @@ import {
   getSticker,
   readLib,
   stickerFile,
-  stickerStats,
   syncStickers,
   writeLib,
 } from './stickers.js'

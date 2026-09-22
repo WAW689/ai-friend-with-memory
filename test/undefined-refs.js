@@ -42,8 +42,14 @@ function assert(cond, message) {
 /** 收集一个模块导出的名字 */
 function exportedNames(code) {
   const names = new Set()
-  // export function foo / export async function foo
-  for (const m of code.matchAll(/export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g)) names.add(m[1])
+  /*
+   * export function foo / export async function foo / export function* foo
+   *
+   * 那个 `\*?` 不能省：llm.js 的 streamChat 是 `export async function*`，
+   * 漏了星号就会把它当成"没导出"，于是下面的导入核对疯狂误报
+   * （实测报出了 engine.js 导入 streamChat 不存在，而它明明存在）。
+   */
+  for (const m of code.matchAll(/export\s+(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/g)) names.add(m[1])
   // export const foo / export let foo
   for (const m of code.matchAll(/export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) names.add(m[1])
   // export { a, b as c }
@@ -134,6 +140,51 @@ check('每个源文件的 import 路径都存在', () => {
   }
   assert(problems.length === 0, `找不到的模块：${problems.join('、')}`)
   return '全部存在'
+})
+
+check('具名导入的目标模块真的有导出那个名字（关键）', () => {
+  /*
+   * 这条抓的是真踩过的坑：
+   *   http.js 里写 `import { stickerStats } from './stickers.js'`，
+   *   但 stickerStats 是 engine.js 的导出。
+   *
+   * 这种错误**运行时才炸，而且炸得很晚**：
+   *   - node --check 只做语法检查，看不出问题
+   *   - 单元测试也可能全过（因为没加载 http.js）
+   *   - 结果服务一启动就 SyntaxError 直接挂，终端上一行红字
+   *
+   * 对 ESM 来说这是加载期错误，所以在静态阶段就能查出来：
+   * 拿每个模块的导出表，去核对每条 import 请求的名字。
+   */
+  const problems = []
+
+  for (const file of files) {
+    const code = fs.readFileSync(path.join(SRC, file), 'utf8')
+
+    for (const m of code.matchAll(/import\s*\{([^}]+)\}\s*from\s*'(\.[^']+)'/g)) {
+      const specifiers = m[1]
+      const target = path.resolve(SRC, m[2])
+      const targetFile = path.basename(target)
+      const available = exportedByFile.get(targetFile)
+
+      // 目标不是 src 下的 .js（或者解析不出来）就跳过，别误报
+      if (!available) continue
+
+      for (const part of specifiers.split(',')) {
+        const piece = part.trim()
+        if (!piece) continue
+        // `a as b` 里要检查的是 a（源名字），不是 b
+        const source = piece.split(/\s+as\s+/)[0].trim()
+        if (!source) continue
+        if (!available.has(source)) {
+          problems.push(`${file} 从 ${m[2]} 导入了 ${source}，但那边没有这个导出`)
+        }
+      }
+    }
+  }
+
+  assert(problems.length === 0, `导入不存在的导出：\n      ${problems.join('\n      ')}`)
+  return `${files.length} 个文件的导入都核对过`
 })
 
 check('每个源文件语法干净、没有顶层 await', () => {
