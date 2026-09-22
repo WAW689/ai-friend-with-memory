@@ -19,6 +19,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { PATHS, loadConfig } from '../src/config.js'
 import { buildBusySection, busyState, busyStatus, replyDelay } from '../src/busy.js'
+import { waitingLabel } from '../src/status.js'
 import { shortActivity } from '../src/activity.js'
 import { activeHoursGate, buildSleepySection, parseSleepWindow, sleepiness } from '../src/sleepy.js'
 import { buildBusyAnnouncePrompt, buildChatSystemPrompt } from '../src/prompts.js'
@@ -197,6 +198,67 @@ check('不忙就不延迟', () => {
   return '0 秒'
 })
 
+check('light（能看手机的那种）不再延迟', () => {
+  /*
+   * 这条是从一次真实的抱怨倒推出来的：
+   * 用户说"他回复我很慢"，一查发现顶栏写着"在改东西，**能看手机**"，
+   * 而她回一条要等 40 秒——状态和延迟在互相打脸。
+   *
+   * 能看手机就该回得快。light 只留在顶栏那行字里，不再换成分秒。
+   */
+  journalJustNow('三百块的活改八遍')
+  const s = busyState()
+  assert(s.level === 'light', `这条应该是 light，实际 ${s.level}`)
+  assert(replyDelay(cfg) === 0, 'light 还在延迟 —— 状态说"能看手机"却在拖时间')
+  return '状态 light，延迟 0'
+})
+
+check('同一个忙碌窗口只等一次', () => {
+  /*
+   * 原来每来一条消息各抽一次延迟。她在忙的那 45 分钟里，
+   * 用户发的每一条都要重新等几十秒——聊两句要等三分钟，
+   * 那不是"她在忙"，是"她卡住了"。
+   *
+   * 真人不这样：你发过去他隔一会儿回一句，从这句起你们就在对话里了。
+   * 所以记住"是哪条流水让我等过"，同一条不再等第二次。
+   */
+  journalJustNow('下楼拿快递')
+  const s = busyState()
+  const first = replyDelay(cfg, { state: s })
+  assert(first > 0, '第一条却没延迟')
+  const second = replyDelay(cfg, { state: s, lastWaitedAt: s.at })
+  assert(second === 0, '同一条流水又延迟了一次 —— 又变成每条都要等')
+  // 换一条新的流水（她真去忙别的了）就该重新等
+  journalJustNow('出门买酱油', 3)
+  const next = busyState()
+  assert(next.at !== s.at, '夹具没写出新流水')
+  assert(replyDelay(cfg, { state: next, lastWaitedAt: s.at }) > 0, '新的忙碌窗口却不延迟了')
+  return `第一条 ${first / 1000} 秒，之后 0 秒`
+})
+
+check('"懒得下楼买"这种否定句不算忙', () => {
+  /*
+   * "懒得"是她的口头禅，而这类句子恰好都带 heavy 动词：
+   *   "看了眼冰箱只有两颗鸡蛋了，懒得下楼买"
+   *   "下午把剩面热了吃，还是懒得洗碗"
+   * 照动词表判她就在忙，可意思正好相反——她没下楼、没洗碗。
+   * 判错的代价不是延迟，是**她显得在撒谎**：说自己在洗碗，其实闲得很。
+   */
+  journalJustNow('看了眼冰箱只有两颗鸡蛋了，懒得下楼买')
+  assert(busyState().level === 'idle', '把"懒得下楼买"当成了在忙')
+  journalJustNow('下午把剩面热了吃，还是懒得洗碗')
+  assert(busyState().level === 'idle', '把"懒得洗碗"当成了在忙')
+  return 'idle'
+})
+
+check('真在忙的流水照样算忙（否定句判断没扩大）', () => {
+  journalJustNow('下楼拿快递')
+  assert(busyState().level === 'heavy', '"下楼拿快递"被误判成不忙了')
+  journalJustNow('起来煮了碗面')
+  assert(busyState().level === 'heavy', '"煮面"被误判成不忙了')
+  return 'heavy'
+})
+
 check('忙就延迟，且落在合理区间', () => {
   journalJustNow('下楼拿快递')
   const d = replyDelay(cfg)
@@ -254,6 +316,35 @@ check('busyStatus 给得出人看的摘要', () => {
   assert(typeof st.agoMinutes === 'number', '没给出多久之前')
   assert(st.wouldDelaySeconds > 0, '没给出会延迟多少')
   return `${st.level} · ${st.agoMinutes} 分钟前 · 延迟 ${st.wouldDelaySeconds} 秒`
+})
+
+check('light 时不注入"我在忙"那段（她本来就没被耽误）', () => {
+  /*
+   * 状态和说辞必须同源。light 不再延迟了，如果还给她那段
+   * "你刚才在忙这个，所以看到消息晚了一点"，她就会编一句
+   * "刚在改东西"——可她根本没被耽误。那是**她说的话和事实对不上**，
+   * 比回得慢更伤。
+   */
+  journalJustNow('三百块的活改八遍')
+  const s = busyState()
+  assert(s.level === 'light', `夹具应该是 light，实际 ${s.level}`)
+  assert(buildBusySection(s) === '', 'light 还注入了"我在忙"那段 —— 她要说假话了')
+  journalJustNow('下楼拿快递')
+  assert(buildBusySection(busyState()).includes('下楼拿快递'), 'heavy 反而不注入了')
+  return 'light 空 / heavy 有'
+})
+
+check('等待时那句话和顶栏同一套说法', () => {
+  journalJustNow('起来煮了碗面')
+  const s = busyState()
+  const label = waitingLabel(s)
+  assert(label.includes('煮面'), `没带上她在忙什么：${label}`)
+  assert(!label.startsWith('在在'), `拼出了"在在"：${label}`)
+  // "睡着了"这类本身就是完整状态，不能再加"在"
+  journalJustNow('十二点半被猫踩醒，又睡过去了')
+  const asleep = waitingLabel(busyState())
+  assert(!asleep.includes('在睡'), `"睡着了"被拼成"在睡着了"：${asleep}`)
+  return `${label} / ${asleep}`
 })
 
 console.log('\n她的作息解析\n')

@@ -60,7 +60,7 @@ import {
   writeLib,
 } from './stickers.js'
 import { store, toWireMessage } from './storage.js'
-import { stateForUI } from './status.js'
+import { stateForUI, waitingLabel } from './status.js'
 import {
   catchUpDaySummaries,
   daysStats,
@@ -371,6 +371,21 @@ async function handleApi(req, res, url, cfg) {
           images,
           onChunk: (delta, full) => {
             res.write(`event: delta\ndata: ${JSON.stringify({ delta, full })}\n\n`)
+          },
+          /*
+           * 她要在忙里等一会儿时，先把"为什么等"告诉页面。
+           *
+           * 不说的话，用户看到的就是三点动画转四十秒——那和卡住没区别，
+           * 而这里明明有一句实话可以说。这一条正好是"把'她没回我'
+           * 从悬念变成信息"的同一个思路，只不过发生在消息区而不是顶栏。
+           */
+          onDelay: (ms, busy) => {
+            res.write(
+              `event: waiting\ndata: ${JSON.stringify({
+                seconds: Math.round(ms / 1000),
+                label: waitingLabel(busy),
+              })}\n\n`,
+            )
           },
         })
         res.write(`event: done\ndata: ${JSON.stringify({ message: toWireMessage(message), snapshot: store.snapshot() })}\n\n`)

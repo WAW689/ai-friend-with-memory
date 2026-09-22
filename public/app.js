@@ -180,8 +180,26 @@ function typewriterTick(now) {
   }
 }
 
-/* ------------------------------------------------------------- 发图片 */
+/**
+ * 她在忙、要等一会儿时，把三点动画换成一句实话。
+ *
+ * 三点动画表示"正在输入"，可她这时候还没开始动笔——等四十秒的话，
+ * 那三点就是在骗人。换成"在洗碗，等一下"之后，等待从**悬念**变成**信息**，
+ * 这也是整个项目一直在做的事（顶栏那行字是同一个思路）。
+ *
+ * 第一个字吐出来时逐字动画会 replaceChildren()，这块自动消失，
+ * 所以这里不用管"什么时候撤掉"。
+ */
+function showWaitingHint(bubble, payload) {
+  if (!bubble) return
+  const line = document.createElement('span')
+  line.className = 'typing-hint'
+  // 措辞由服务端给（和顶栏那行同源），这里不放自己的版本
+  line.textContent = String(payload?.label ?? '').trim() || '手上有点事，等一下'
+  bubble.replaceChildren(line)
+}
 
+/* ------------------------------------------------------------- 发图片 */
 /** 待发送的图片（data URL）。发送或移除后清空。 */
 const Pending = { images: [] }
 
@@ -1205,6 +1223,15 @@ async function send() {
           streamed = payload.full
           // 不直接写 DOM，交给自适应动画按帧更新
           typewriterFeed(streamed, elapsed)
+        } else if (type === 'waiting') {
+          /*
+           * 她在忙，要等一会儿才动笔。
+           *
+           * 三点动画这时候是在**说谎**——它表示"正在输入"，
+           * 可她还没开始。所以换成一句实话：她在干嘛、要等多久。
+           * 第一个字吐出来时，逐字动画会把这块内容整个换掉。
+           */
+          showWaitingHint(typingBubble, payload)
         } else if (type === 'done') {
           // flush 让气泡先显示完整文字，避免"打完字又补一段"的跳动
           typewriterFlush()

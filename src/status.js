@@ -30,6 +30,12 @@ import { sleepiness } from './sleepy.js'
 export { parseActivity, shortActivity } from './activity.js'
 
 /**
+ * 这些话本身就是完整状态，不用加"在"。
+ * 拼成"在睡着了"会很好笑。
+ */
+const STANDALONE_ACTIVITY = /^(睡着了|睡了|已睡着)$/
+
+/**
  * 她现在的状态。
  *
  * 优先级：正在打字 > 睡着 > 忙 > 空闲。
@@ -87,16 +93,23 @@ export function herState(cfg, { at = now(), generating = false } = {}) {
        * "睡着了"这类本身就是完整状态，不用加"在"。
        * 拼成"在睡着了"会很好笑。
        */
-      const isStandalone = /^(睡着了|睡了|已睡着)$/.test(what)
+      const isStandalone = STANDALONE_ACTIVITY.test(what)
       const label = isStandalone
         ? what
         : busy.level === 'heavy'
           ? `在${what}`
           : `在${what}，能看手机`
+      /*
+       * 只有 heavy 才敢写"回得可能慢一点"。
+       *
+       * light 不延迟了（能看手机就该回得快），如果这里还写着"回得可能慢"，
+       * 那就成了**界面在替她许一个不会兑现的承诺**——用户等不到那个"慢"，
+       * 只会觉得这行字是假的。宁可少说一句。
+       */
       return {
         key: busy.level === 'heavy' ? 'busy' : 'around',
         label,
-        detail: isStandalone ? '回得可能慢一点' : `${ago} · 回得可能慢一点`,
+        detail: busy.level === 'heavy' ? (isStandalone ? '回得可能慢一点' : `${ago} · 回得可能慢一点`) : ago,
         since: busy.at,
       }
     }
@@ -121,4 +134,18 @@ export function stateForUI(cfg, opts = {}) {
     since: state.since,
     at: opts.at ?? now(),
   }
+}
+
+/**
+ * "她为什么还没开始回"那句话（消息区里顶在三点动画位置上的）。
+ *
+ * 和顶栏那行**必须同一套说法**，所以放在同一个文件里：
+ * 两处措辞不一样的话，用户会以为在讲两件事。
+ * 而这一句存在的意义就是把等待从悬念变成信息——
+ * 三点动画转四十秒是在骗人（她还没动笔），一句实话不是。
+ */
+export function waitingLabel(state) {
+  const what = shortActivity(state?.text ?? '')
+  if (!what) return '手上有点事，等一下'
+  return STANDALONE_ACTIVITY.test(what) ? `${what}，等一下` : `在${what}，等一下`
 }

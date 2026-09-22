@@ -266,6 +266,10 @@ html, body {
   30% { opacity: 1; transform: translateY(-3px); }
 }
 
+/* 她在忙时顶上来的那句实话（"在洗碗，等一下"）。
+   比正文小、比正文淡：它是解释，不是她说的话。 */
+.typing-hint { font-size: 13px; color: var(--text-dim); }
+
 .hold-banner {
   flex: 0 0 auto;
   margin: 0 12px 4px;

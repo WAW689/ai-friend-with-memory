@@ -548,14 +548,34 @@ export async function respond(text, hooks = {}) {
    *
    * hook 是给调用方标记状态用的（前端可以显示"她可能在忙"），
    * 不传也不影响。
+   *
+   * ── 为什么要把 lastBusyWaitedAt 记下来 ──────────────
+   * 同一个忙碌窗口里只等一次。不然她在忙的那 45 分钟里，
+   * 用户发的每一条都要重新等几十秒，聊两句要等三分钟——
+   * 那不是"她在忙"，那是"她卡住了"。
+   * 标记先落，再睡：这样用户等的时候又发一条，第二条不用再等。
    */
-  const delayMs = replyDelay(cfg, { state: ctx.busy })
+  const delayMs = replyDelay(cfg, {
+    state: ctx.busy,
+    lastWaitedAt: store.state.lastBusyWaitedAt,
+  })
   if (delayMs > 0) {
+    store.state.lastBusyWaitedAt = ctx.busy.at
+    store.saveState()
     hooks.onDelay?.(delayMs, ctx.busy)
     log.info(`她在忙（${truncate(ctx.busy.text, 24)}），${Math.round(delayMs / 1000)} 秒后再回`)
     await sleep(delayMs)
     // 等待期间对方可能撤回了 / 断线了
-    if (hooks.signal?.aborted) throw new Error('已取消')
+    if (hooks.signal?.aborted) {
+      /*
+       * 这一条没送到，那"等过了"就不算数：把标记退回去，
+       * 下一条还会正常等一次。不然刷新一次页面就把那一次等待
+       * 白白吃掉了，用户永远等不到解释。
+       */
+      store.state.lastBusyWaitedAt = 0
+      store.saveState()
+      throw new Error('已取消')
+    }
   }
 
   store.state.generating = true

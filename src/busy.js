@@ -79,6 +79,20 @@ const VERB_LEVEL = {
 const DONE_MARKERS = /完了|好了/
 
 /**
+ * "压根没做"的信号。命中就不算忙。
+ *
+ * 这条是被她自己的流水逼出来的——"懒得"是她的口头禅：
+ *   "看了眼冰箱只有两颗鸡蛋了，懒得下楼买"
+ *   "下午把剩面热了吃，还是懒得洗碗"
+ * 两句里都有 heavy 动词（下楼、洗碗），照动词表判她就在忙，
+ * 可意思恰恰相反：她**没**下楼、**没**洗碗，正窝着发呆。
+ *
+ * 于是用户看到的是"她在洗碗，回得慢"，实际她闲得很。
+ * 判错的代价不是延迟本身，是**她显得在撒谎**。
+ */
+const NOT_DONE_MARKERS = /懒得|不想|没去|没买|没洗|算了|还是算了/
+
+/**
  * 兜底：动词认不出来时，再从整句里找"明确的忙碌信号"。
  *
  * 保留这一层是因为她有些话没有动词，
@@ -92,13 +106,23 @@ const EXTRA_PATTERNS = [
 /**
  * 忙的档位 → 延迟秒数区间。
  *
- * 数字是刻意选的：
- *   - 低于 10 秒感知不到"她在忙"，那不如不延迟
- *   - 高于 3 分钟用户会以为消息没发出去，开始怀疑服务挂了
+ * ── 只有 heavy 才延迟（这一条改过一次，原因值得记下来）──────
+ * 原来 light 也延迟 12–60 秒，于是出现最荒唐的一幕：
+ * 顶栏写着"在改东西，**能看手机**"，回一条消息却要等 40 秒。
+ *
+ * 那不只是慢，是**自相矛盾**：能看手机就该回得快。
+ * 而且 light 覆盖的是看/刷/吃/收拾这类日常，几乎她所有流水都算，
+ * 结果用户几乎每次回来都要先等一段没有解释的空白。
+ *
+ * 现在的分工干净了：
+ *   heavy → 手上真占着（煮、洗、出门、排队），等一次，并且会交代一句
+ *   light → 能看手机，不延迟，只反映在顶栏那行字上
+ *
+ * 上限从 150 收到 60：只有真忙才等，但等两分半仍然会让人以为消息没发出去。
+ * 有那句"在煮面，等一下"顶着，一分钟是能等的；再多就该怀疑服务了。
  */
 const DELAY_RANGE = {
-  heavy: [35, 150],
-  light: [12, 60],
+  heavy: [20, 60],
 }
 
 /**
@@ -149,7 +173,7 @@ export function busyState({ at = now() } = {}) {
    * 注意这个判断是**窄的**（只认"吃完""洗完"这种无歧义短语），
    * 原因见 DONE_MARKERS 的注释。
    */
-  const done = DONE_MARKERS.test(last.text)
+  const done = DONE_MARKERS.test(last.text) || NOT_DONE_MARKERS.test(last.text)
   if (!done) {
     for (const level of ['heavy', 'light']) {
       if (VERB_LEVEL[level].has(verb)) {
@@ -171,20 +195,30 @@ export function busyState({ at = now() } = {}) {
  * 这一轮该延迟多久（毫秒）。
  *
  * 三条硬约束，都是"别把真人感做成卡顿"：
- *   - 从不延迟（idle）
- *   - 上限压得比较死（最忙也就两分半），超了用户会怀疑消息没发出去
+ *   - 只有 heavy 才延迟（light 是"能看手机"，就该回得快，见 DELAY_RANGE）
+ *   - **同一个忙碌窗口只等一次**（lastWaitedAt 认的就是这条）
  *   - 关掉功能就一律 0
  *
+ * ── 为什么要"只等一次" ──────────────────────────────
+ * 原来是每来一条消息各抽一次延迟。于是她在忙的那 45 分钟里，
+ * 用户发的**每一条**都要重新等几十秒——聊两句要等三分钟，
+ * 那已经不是"她在忙"，是"她卡住了"。
+ *
+ * 真人不这样：你发过去，他隔一会儿回你一句，从这句起你们就在对话里了，
+ * 后面是正常速度。所以这里记住"是哪条流水让我等过"，同一条不再等第二次。
+ *
  * @param {object} cfg
- * @param {{state?: object, at?: number}} [opts]
+ * @param {{state?: object, at?: number, lastWaitedAt?: number}} [opts]
+ *   lastWaitedAt：上一次因为哪条流水（的 at）等过。调用方从 state 里读。
  */
-export function replyDelay(cfg, { state, at = now() } = {}) {
+export function replyDelay(cfg, { state, at = now(), lastWaitedAt = 0 } = {}) {
   if (cfg?.busy?.enabled === false) return 0
 
   const s = state ?? busyState({ at })
-  if (s.level === 'idle') return 0
+  if (s.level !== 'heavy') return 0
+  if (s.at && s.at === lastWaitedAt) return 0
 
-  const [lo, hi] = DELAY_RANGE[s.level] ?? DELAY_RANGE.light
+  const [lo, hi] = DELAY_RANGE[s.level] ?? DELAY_RANGE.heavy
   const seconds = randInt(lo, hi)
   return seconds * 1000
 }
@@ -192,11 +226,17 @@ export function replyDelay(cfg, { state, at = now() } = {}) {
 /**
  * 拼成注入提示词的那一小段。
  *
- * 只在真的忙时给。措辞的重点是让她**说一句交代**，
- * 而不是变得冷淡——延迟本身用户看不见原因，一句话就把"卡顿"变成"她在忙"。
+ * **只有 heavy 才给**，因为只有 heavy 真的延迟了。
+ *
+ * 原来 light 也给，于是她会说"刚才手上有点事"——可她根本没被耽误
+ * （light 不延迟了）。那就成了说假话，而"她说的话和事实对不上"
+ * 比"她回得慢"更伤。light 那点信息顶栏已经有了，不需要她再演一遍。
+ *
+ * 措辞的重点是让她**说一句交代**，而不是变得冷淡——
+ * 延迟本身用户看不见原因，一句话就把"卡顿"变成"她在忙"。
  */
 export function buildBusySection(state) {
-  if (!state || state.level === 'idle') return ''
+  if (!state || state.level !== 'heavy') return ''
 
   const minutes = Math.round((state.ageMs ?? 0) / 60000)
   const ago = minutes < 1 ? '刚刚' : `${minutes} 分钟前`
@@ -223,4 +263,4 @@ export function busyStatus(cfg, at = now()) {
   }
 }
 
-export { FRESHNESS_MS, DELAY_RANGE, VERB_LEVEL, EXTRA_PATTERNS }
+export { FRESHNESS_MS, DELAY_RANGE, VERB_LEVEL, EXTRA_PATTERNS, NOT_DONE_MARKERS }

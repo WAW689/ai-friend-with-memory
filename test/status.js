@@ -190,22 +190,43 @@ check('heavy 和 light 的措辞不同（区别是"能不能看手机"）', () =
 
 console.log('\n铁律：状态和延迟必须同源（关键）\n')
 
-check('状态说"在忙"时，延迟**必须**大于 0', () => {
+check('状态说"在忙"（heavy）时，延迟**必须**大于 0', () => {
   /*
    * 这条是整个方案最容易穿帮的地方。
    * 状态栏说"在煮面"、消息却秒回——那比不显示状态更假。
    * 所以两者必须用同一份 busyState()。
    */
-  const cases = ['起来煮了碗西红柿鸡蛋面', '刚刚下楼拿快递', '改到第四版']
+  const cases = ['起来煮了碗西红柿鸡蛋面', '刚刚下楼拿快递']
   for (const text of cases) {
     justNow(text)
     const s = herState(cfg)
     const delay = replyDelay(cfg)
-    if (s.key === 'busy' || s.key === 'around') {
-      assert(delay > 0, `状态显示「${s.label}」但延迟是 0 —— 会穿帮`)
-    }
+    assert(s.key === 'busy', `「${text}」该显示在忙，实际 ${s.key}（${s.label}）`)
+    assert(delay > 0, `状态显示「${s.label}」但延迟是 0 —— 会穿帮`)
+    assert(/慢/.test(s.detail), `说在忙却没说会慢一点：${s.detail}`)
   }
   return `${cases.length} 种情况都对得上`
+})
+
+check('状态说"能看手机"（light）时，延迟**必须**是 0，文案也不能说会慢', () => {
+  /*
+   * 这条是反方向的穿帮，比上一条更隐蔽，而且**真的发生了一回**：
+   *
+   *   顶栏写着「在改东西，能看手机」，用户回一条消息却要等 40 秒。
+   *   用户看到的是"她说能看手机，却拖了我 40 秒"——
+   *   那比不显示状态更像在敷衍。
+   *
+   * 现在 light 只反映"她在干嘛"，不换成分秒；相应地，文案里也不能
+   * 再出现"回得可能慢一点"——那是界面在替她许一个不兑现的承诺。
+   */
+  justNow('三百块的活改八遍')
+  const s = herState(cfg)
+  const delay = replyDelay(cfg)
+  assert(s.key === 'around', `该显示 around，实际 ${s.key}（${s.label}）`)
+  assert(/能看手机/.test(s.label), 'light 该说能看手机：' + s.label)
+  assert(delay === 0, `说"能看手机"却延迟了 ${delay / 1000} 秒 —— 又穿帮了`)
+  assert(!/慢/.test(s.detail), `说能看手机却暗示会慢：${s.detail}`)
+  return `${s.label} · ${s.detail} · 延迟 0`
 })
 
 check('状态说"在的"时，延迟**必须**是 0', () => {

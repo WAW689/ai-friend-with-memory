@@ -168,6 +168,19 @@ const daysChecks = [
   ['CSS 有 .day-date / .day-text', /\.day-date\s*\{/.test(css) && /\.day-text\s*\{/.test(css)],
 ]
 
+// 她在忙、要等一会儿时顶上来的那句实话
+//
+// 从前这段时间里只有三点动画在转，而那三点表示"正在输入"——
+// 她其实还没动笔。用户看到的就是"她打了四十秒字"。
+// 现在服务端会先推一条 waiting，把原因写在原地。
+const waitingChecks = [
+  ['服务端会推 waiting 事件', /event: waiting/.test(fs.readFileSync(new URL('../src/http.js', import.meta.url), 'utf8'))],
+  ['JS 认识 waiting 事件', /type === 'waiting'/.test(js)],
+  ['等待提示替换掉三点动画', /function showWaitingHint/.test(js) && /replaceChildren\(line\)/.test(js)],
+  ['措辞由服务端给（不在前端另写一套）', /payload\?\.label/.test(js)],
+  ['CSS 有 .typing-hint', /\.typing-hint\s*\{/.test(css)],
+]
+
 let failed = 0
 for (const [name, ok] of checks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
@@ -218,6 +231,12 @@ for (const [name, ok] of statusChecks) {
 
 console.log('\n她的日子')
 for (const [name, ok] of daysChecks) {
+  console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
+  if (!ok) failed++
+}
+
+console.log('\n在忙时的等待提示')
+for (const [name, ok] of waitingChecks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
   if (!ok) failed++
 }
