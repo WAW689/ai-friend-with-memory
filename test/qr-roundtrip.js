@@ -477,7 +477,7 @@ console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`)
 
 if (fail === 0) {
   // 打印一个可扫的样例，方便用手机实测
-  const demo = 'http://100.101.102.103:8787/?token=demo'
+  const demo = 'http://100.101.102.103:8787/?token=demo' // 示例地址 NOT-REAL，不含任何真实信息
   console.log('下面是编码 "' + demo + '" 的字符画，可以用手机相机直接扫一下做最终验证：\n')
   console.log(toTerminal(demo, { margin: 1 }))
   console.log('')
