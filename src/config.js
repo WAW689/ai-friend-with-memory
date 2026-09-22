@@ -46,6 +46,8 @@ export const PATHS = {
   // 表情包：图直接丢进 stickers/，索引和描述在 stickerLib
   stickers: path.join(DATA_DIR, 'stickers'),
   stickerLib: path.join(DATA_DIR, 'stickers.json'),
+  // 待回访的事（"过几天该问问"的清单）
+  recall: path.join(DATA_DIR, 'recall.json'),
   public: path.join(ROOT, 'public'),
 }
 
@@ -267,6 +269,13 @@ const DEFAULTS = {
      */
     inProactive: true,
   },
+  // 主动回访（"过几天该回头问问"的事）
+  recall: {
+    // 关掉就不会主动回头问，也不抽这类事项
+    enabled: true,
+    // 模型没给建议天数时的兜底
+    defaultAfterDays: 3,
+  },
 }
 
 /** 深合并：只覆盖用户显式写了的字段 */
@@ -356,6 +365,9 @@ function envOverride(cfg) {
   set(out.weather, 'latitude', take(['FRIEND_LATITUDE'], num))
   set(out.weather, 'longitude', take(['FRIEND_LONGITUDE'], num))
 
+  set(out.recall, 'enabled', take(['FRIEND_RECALL'], bool))
+  set(out.recall, 'defaultAfterDays', take(['FRIEND_RECALL_AFTER_DAYS'], num))
+
   return out
 }
 
@@ -385,6 +397,10 @@ function bootstrapFiles() {
       JSON.stringify({ version: 1, items: [] }, null, 2) + '\n',
       'utf8',
     )
+  }
+  // 待回访清单：空着就是"暂时没有该回头问的事"，不需要预置内容
+  if (!fs.existsSync(PATHS.recall)) {
+    fs.writeFileSync(PATHS.recall, JSON.stringify({ version: 1, items: [] }, null, 2) + '\n', 'utf8')
   }
 }
 

@@ -89,6 +89,7 @@ const OFFLINE = [
   ['会变的自我', 'self.js'],
   ['表情包', 'stickers.js'],
   ['黄历与天气', 'almanac.js'],
+  ['体检与待回访', 'doctor.js'],
   ['备份与消息序号', 'backup-and-seq.js'],
   ['逐字动画算法', 'typing-animation.js'],
   ['头像', 'avatar.js'],

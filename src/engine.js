@@ -16,11 +16,13 @@ import { buildSelfSection, evolveSelf, renderExperiences } from './self.js'
 import { markStickerUsed, stickerMenu } from './stickers.js'
 import { describeNow } from './almanac.js'
 import { buildWeatherSection, getWeather, peekSunTimes } from './weather.js'
+import { buildRecallSection, dueRecalls, markAsked, pruneRecall, readRecall, addRecall } from './recall.js'
 import {
   buildChatSystemPrompt,
   buildMemoryPrompt,
   buildProactiveDecisionPrompt,
   buildProactiveMessagePrompt,
+  buildRecallPrompt,
   buildStickerSection,
   buildSummaryPrompt,
   renderTranscript,
@@ -257,6 +259,13 @@ function isUserWatchingScreen(windowMs = 90 * 1000) {
 
 /* --------------------------------------------------------------- 上下文 */
 
+/**
+ * 拼出这一轮要喂给她的所有材料。
+ *
+ * 已经导出（见文件末尾的 export 列表）给 doctor 用：
+ * 体检必须跑**同一份**拼装逻辑，自己再实现一遍就失去意义了——
+ * 那样只会检查到"我以为的拼装方式"。
+ */
 function buildContext(cfg) {
   const summary = readSummary()
   // 摘要已经覆盖的部分不重复喂给模型
@@ -631,6 +640,19 @@ export async function runProactiveCheck(options = {}) {
     ctx.nowText = describeNow(new Date(at), { sunrise: weather.sunrise, sunset: weather.sunset })
   }
 
+  /*
+   * 待回访的事。
+   *
+   * 这是记忆第一次变成**主动行为**：以前她只会在你问起时想起来，
+   * 现在到期的事会进主动开口的候选话题——"你上次说实习那事后来怎么样了"。
+   * 一个真朋友会这样，一个只会应答的系统不会。
+   *
+   * 只在主动开口时给。聊天回复里塞这个会让她显得像在"交作业"。
+   */
+  const due = dueRecalls({ at })
+  ctx.recallSection = buildRecallSection({ at })
+  ctx.dueRecallIds = due.map((it) => it.id)
+
   const context = {
     lastUserAgo: humanAgo(store.state.lastUserMessageAt, at),
     lastAssistantAgo: humanAgo(store.state.lastAssistantMessageAt, at),
@@ -745,6 +767,20 @@ export async function runProactiveCheck(options = {}) {
   // 消息真的发出去了才记账
   noteStickerDelivered(sticker)
 
+  /*
+   * 待回访的事也标记成"问过了"。
+   *
+   * 刻意不判断"她到底问没问"（那要再调一次模型，不值）。
+   * 理由是：这些事已经作为话题给她了，过期再喂一次反而会让她反复问同一件事——
+   * 那比"漏问一次"更像机器人。宁可少问，不要重问。
+   *
+   * force/dryRun 不标记：那是调试路径，不该消耗掉真实的话题。
+   */
+  if (!force && Array.isArray(ctx.dueRecallIds) && ctx.dueRecallIds.length) {
+    for (const id of ctx.dueRecallIds) markAsked(id)
+    pruneRecall()
+  }
+
   store.state.lastHoldReason = ''
   store.state.lastAssistantMessageAt = now()
   store.saveState()
@@ -800,6 +836,7 @@ async function generateProactiveMessages(cfg, ctx, mood) {
     stickerSection: ctx.stickerSection,
     nowText: ctx.nowText,
     weatherSection: ctx.weatherSection,
+    recallSection: ctx.recallSection,
   })
 
   try {
@@ -1165,13 +1202,66 @@ export async function extractMemory(cfg = loadConfig()) {
   const transcript = renderTranscript(store.recent(40), { maxChars: 9000, now: now() })
   if (!transcript) return { updated: false, reason: '没有可用对话' }
 
-  const text = await complete(cfg, buildMemoryPrompt({ existingMemory: existing, transcript }), { maxTokens: 800 })
-  const cleaned = text.trim()
+  /*
+   * 记忆和"待回访的事"一起抽，但用两次独立调用。
+   *
+   * 不合成一次的原因：记忆那份的输出必须是**干净的 markdown 文件**，
+   * 混进 JSON 会把文件弄脏。而且两者性质不同——记忆是长期事实，
+   * 回访是几天内有效的临时跟进。
+   *
+   * 回访那次失败不影响记忆：那只是锦上添花。
+   */
+  const [memoryResult, recallResult] = await Promise.allSettled([
+    complete(cfg, buildMemoryPrompt({ existingMemory: existing, transcript }), { maxTokens: 800 }),
+    extractRecalls(cfg, transcript),
+  ])
+
+  const recalls = recallResult.status === 'fulfilled' ? recallResult.value : { added: 0 }
+  if (recallResult.status === 'rejected') {
+    log.warn(`抽取待回访事项失败：${recallResult.reason?.message ?? recallResult.reason}`)
+  }
+
+  if (memoryResult.status === 'rejected') {
+    return { updated: false, reason: `记忆抽取失败：${memoryResult.reason?.message}` }
+  }
+
+  const cleaned = String(memoryResult.value ?? '').trim()
   if (!cleaned || cleaned.length < 10) return { updated: false, reason: '模型返回内容太短' }
 
   writeMemory(cleaned)
-  log.info('已更新长期记忆档案')
-  return { updated: true, memory: cleaned }
+  log.info(
+    `已更新长期记忆档案${recalls.added ? `，新增 ${recalls.added} 件待回访的事` : ''}`,
+  )
+  return { updated: true, memory: cleaned, recalls }
+}
+
+/**
+ * 从最近的对话里挑出"过几天该回头问问"的事。
+ *
+ * 这是记忆第一次变成**主动行为**：以前她只在你问起时想起来，
+ * 现在这些事会到期进她主动开口的候选话题。
+ */
+async function extractRecalls(cfg, transcript) {
+  const existing = readRecall().items.filter((it) => !it.askedAt).map((it) => it.text)
+
+  const text = await complete(cfg, buildRecallPrompt({ transcript, existing }), {
+    maxTokens: 400,
+    // 这件事要的是"判断"，不是"发挥"——温度高了会硬凑
+    temperature: 0.3,
+  })
+
+  const parsed = extractJson(text)
+  const items = Array.isArray(parsed?.items) ? parsed.items : []
+  let added = 0
+  for (const it of items) {
+    const entry = addRecall({
+      text: it?.text,
+      afterDays: Number.isFinite(it?.afterDays) ? Math.min(14, Math.max(1, it.afterDays)) : undefined,
+      source: 'chat',
+    })
+    if (entry) added++
+  }
+  return { added, considered: items.length }
 }
 
 /** 把早期对话压进摘要 */

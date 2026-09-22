@@ -391,6 +391,106 @@ const commands = {
   },
 
   /**
+   * 提示词体检。
+   *
+   * 这个项目的四次事故全都是"以为给了她、其实没给"。这条命令把那种排查
+   * 变成一次输出：她这轮到底知道什么、每一段在不在拼好的提示词里。
+   */
+  async doctor() {
+    needStore()
+    const { runDoctor, doctorVerdict, estimateTokens } = await import('./doctor.js')
+    const { buildContext } = await import('./engine.js')
+    const { buildChatSystemPrompt, buildProactiveMessagePrompt } = await import('./prompts.js')
+    const { buildWeatherSection, getWeather } = await import('./weather.js')
+    const { buildRecallSection } = await import('./recall.js')
+
+    // 真的拼两份出来核对，而不是只检查数据文件存不存在。
+    const ctx = buildContext(cfg)
+    const realPrompt = buildChatSystemPrompt({ ...ctx, lastExchangeAt: 0 })
+
+    /*
+     * 主动开口那份要单独拼——它跟聊天那份**故意不一样**：
+     * 带天气、带待回访的事，不带对话记录。
+     * 不分开核对的话，doctor 会把"天气不在聊天提示词里"这个设计报成故障。
+     */
+    const weather = cfg.weather?.inProactive === false ? null : await getWeather(cfg)
+    const proactivePrompt = (() => {
+      const messages = buildProactiveMessagePrompt({
+        persona: ctx.persona,
+        memory: ctx.memory,
+        summary: ctx.summary,
+        transcript: ctx.transcript,
+        lastUserAgo: '3 小时前',
+        lastAssistantAgo: '2 小时前',
+        unansweredStreak: 0,
+        todayCount: 1,
+        selfSection: ctx.selfSection,
+        lifeSection: ctx.lifeSection,
+        stickerSection: ctx.stickerSection,
+        nowText: ctx.nowText,
+        weatherSection: buildWeatherSection(weather),
+        recallSection: buildRecallSection(),
+      })
+      return Array.isArray(messages) ? messages.map((m) => m.content).join('\n') : String(messages)
+    })()
+
+    const report = runDoctor(cfg, {
+      nowText: ctx.nowText,
+      weather,
+      chatPrompt: realPrompt,
+      proactivePrompt,
+    })
+
+    const showAll = args.includes('--prompt')
+
+    console.log('')
+    console.log('  ── 她这轮知道什么 ──')
+    console.log('')
+    for (const s of report.sections) {
+      const mark = s.hasContent ? '✓' : '·'
+      const injected =
+        s.inPrompt === true ? '已注入' : s.inPrompt === false ? '**没注入**' : '—'
+      console.log(
+        `  ${mark} ${s.name.padEnd(12, '　')} ${String(s.chars).padStart(5)} 字  ` +
+          `~${String(s.tokens).padStart(4)} token  ${injected}`,
+      )
+      console.log(`      ${s.source}`)
+      if (!s.hasContent) {
+        console.log(`      ${'→ ' + s.emptyHint}`)
+      }
+      if (s.inPrompt === false) {
+        console.log('      → 内容存在但没进提示词！检查拼装逻辑，这是最难发现的一类问题。')
+      }
+      console.log('')
+    }
+
+    const verdict = doctorVerdict(report)
+    console.log('  ── 结论 ──')
+    console.log('')
+    console.log(`  ${verdict.level === 'bad' ? '✗' : '✓'} ${verdict.text}`)
+    console.log('')
+
+    console.log('  ── 规模 ──')
+    console.log('')
+    console.log(`  系统提示词      ${realPrompt.length} 字，约 ${estimateTokens(realPrompt)} token`)
+    console.log(`  对话记录        ${ctx.recent.length} 条，约 ${estimateTokens(ctx.transcript)} token`)
+    console.log(`  她主动开口时    另外一份提示词（带天气，不带对话记录）`)
+    console.log('')
+    console.log(`  生活流水 ${report.journalCount} 条 · 表情包 ${report.stickerWithDesc}/${report.stickerCount} 张有描述 · 待回访 ${report.pendingCount} 件`)
+    console.log('')
+
+    if (showAll) {
+      console.log('  ── 完整系统提示词（--prompt）──')
+      console.log('')
+      for (const line of realPrompt.split('\n')) console.log('  ' + line)
+      console.log('')
+    } else {
+      console.log('  想看完整提示词就加 --prompt')
+      console.log('')
+    }
+  },
+
+  /**
    * 看"她眼里的现在"是什么样。
    *
    * 这个命令的价值在于：她会不会说错日期、会不会把中秋说成别的日子、

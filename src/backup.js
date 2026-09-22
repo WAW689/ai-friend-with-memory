@@ -94,6 +94,14 @@ export function runBackup(options = {}) {
      * 但索引要备——里面的描述是模型逐张看图生成的，重来一遍又要花钱花时间。
      */
     ['stickers.json', PATHS.stickerLib],
+    /*
+     * 待回访的事。
+     *
+     * 必须备份：每件事都带着"什么时候该问、问过没有"。
+     * 丢了的话她刚记下的"你那个面试有信儿没"就没了，
+     * 而且你也不会知道丢了什么。
+     */
+    ['recall.json', PATHS.recall],
   ]
   for (const [name, source] of plainFiles) {
     if (!fs.existsSync(source)) continue
