@@ -7,6 +7,8 @@
  *
  * 用法：node test/prompts.js
  */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import {
   renderTranscript,
   buildChatSystemPrompt,
@@ -147,6 +149,35 @@ check('提示词包含当前日期和星期', () => {
   assert(prompt.includes(dayKey(now)), '缺少今天的日期')
   assert(/周[日一二三四五六]/.test(prompt), '缺少星期')
   return '日期+星期都在'
+})
+
+check('时间信息排在最前面，且措辞足够强硬（关键回归点）', () => {
+  /*
+   * 这里踩过一个很典型的坑：时间原来写在最后一段，
+   * 结果模型回答"现在几点"时说"两点半"——它抓的是对话记录里
+   * 13:57 那句"我们聊到两点半"，完全无视提示词里的 15:53。
+   *
+   * LLM 对时间就是这样：对话记录里全是相对时间表达（"两点半""九点十分"），
+   * 它会优先锚定那些。所以时间必须①放最前 ②写完整 ③显式禁止推断。
+   */
+  const prompt = buildChatSystemPrompt({
+    persona: '你叫阿岚',
+    memory: '',
+    lastExchangeAt: now,
+  })
+  const firstSection = prompt.split('\n\n')[0]
+  assert(/现在是 \d{4}-\d{2}-\d{2}/.test(firstSection), '时间不在第一段')
+  assert(/唯一准确的时间/.test(firstSection), '缺少"这是唯一准确时间"的强调')
+  assert(/绝不要.*推断|不要.*推断/.test(prompt), '缺少"不要从对话里推断时间"的禁令')
+  assert(/为准/.test(prompt), '缺少时间冲突时的裁决规则')
+  return '在第一段，含禁令与裁决规则'
+})
+
+check('提示词里不再有旧标题「现在的真实情况」', () => {
+  // 改名后如果还有残留，说明改漏了
+  const prompt = buildChatSystemPrompt({ persona: 'p', memory: '', lastExchangeAt: now })
+  assert(!/【现在的真实情况】/.test(prompt), '旧标题还在')
+  return '已换成更醒目的标题'
 })
 
 check('提示词说明离上次说话过了多久', () => {

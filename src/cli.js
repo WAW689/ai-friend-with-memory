@@ -15,6 +15,7 @@ import { checkReadiness, loadConfig, saveConfig, PATHS } from './config.js'
 import { testPush, push } from './bark.js'
 import { BACKUP_ROOT, listBackups, runBackup } from './backup.js'
 import { imageStats } from './images.js'
+import { hasLife, lastActivityAt, liveOneRound, readArcs, readJournal, readLife, shouldLive } from './life.js'
 import { characterName, respond, runProactiveCheck, proactiveGate, extractMemory, readMemory, readProactiveEvents } from './engine.js'
 import { verifyKey } from './llm.js'
 import { store } from './storage.js'
@@ -309,6 +310,83 @@ const commands = {
       console.log('  清理：直接删 data/images/ 下不需要的日期目录即可。')
       console.log('  注意：删掉图片后，聊天记录里对应的消息只剩文字，模型也就看不到那张图了。')
     }
+    console.log('')
+  },
+
+  /** 看它自己在过什么日子 */
+  async life() {
+    const lifeText = readLife()
+    const journal = readJournal()
+    const arcs = readArcs()
+
+    console.log('')
+    if (!lifeText.trim()) {
+      console.log('  还没有生活设定。它现在没有"自己的生活"。')
+      console.log('  文件位置：data/life.md')
+      console.log('')
+      return
+    }
+
+    console.log(`  生活设定   ${lifeText.length} 字（data/life.md）`)
+    console.log(`  流水       ${journal.length} 件事`)
+    console.log(`  推进中     ${arcs.length} 条线索`)
+    console.log('')
+
+    if (arcs.length) {
+      console.log('  它最近在推进的事：')
+      for (const a of arcs) console.log(`    · ${a.text}`)
+      console.log('')
+    }
+
+    const recent = journal.slice(-15).reverse()
+    if (recent.length) {
+      console.log('  最近经历的事（新的在前）：')
+      for (const e of recent) {
+        const d = new Date(e.at)
+        const t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+        const day = new Date().toDateString() === d.toDateString()
+          ? '今天'
+          : `${d.getMonth() + 1}/${d.getDate()}`
+        console.log(`    ${day} ${t}  ${e.text}`)
+      }
+    } else {
+      console.log('  流水是空的——它还没有经历过任何事。')
+      console.log('  跑 node src/cli.js live-now 立刻让它过一段日子。')
+    }
+    console.log('')
+  },
+
+  /** 立刻让它过一段日子（会调用模型） */
+  async 'live-now'() {
+    const cfg = loadConfig()
+    const count = Number(args[0]) || 1
+    console.log(`  正在生成 ${count} 件事…`)
+    const result = await liveOneRound({ count })
+    if (!result.ok) {
+      console.log(`  ✗ ${result.reason}`)
+      return
+    }
+    console.log('  ✓ 记下了：')
+    for (const e of result.activities) console.log(`      ${e.text}`)
+    console.log('')
+  },
+
+  /** 看现在该不该"过日子"，以及为什么 */
+  async 'life-status'() {
+    const cfg = loadConfig()
+    needStore()
+    const verdict = shouldLive(cfg, store.state)
+    console.log('')
+    console.log(`  生活功能     ${cfg.life.enabled ? '开启' : '关闭'}`)
+    console.log(`  有没有设定   ${hasLife() ? '有' : '没有（data/life.md）'}`)
+    console.log(`  流水条数     ${readJournal().length}`)
+    const last = lastActivityAt()
+    console.log(`  上次经历     ${last ? humanAgo(last) : '从未'}`)
+    console.log(`  对方上次说话 ${store.state.lastUserMessageAt ? humanAgo(store.state.lastUserMessageAt) : '从未'}`)
+    console.log('')
+    console.log(`  现在该过吗   ${verdict.ok ? '✓ 该' : '✗ 不该（' + verdict.reason + '）'}`)
+    console.log('')
+    console.log('  触发条件：对方安静足够久、距上次经历够久、且不在静默时段')
     console.log('')
   },
 

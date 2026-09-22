@@ -86,13 +86,57 @@ function Show-Status {
     Write-Err "服务没在跑"
   }
 
+  <#
+    查开机自启任务。
+
+    两条路都试：
+    1. Get-ScheduledTask —— 正常环境下的首选，信息最全
+    2. schtasks /query —— 备用。某些受限环境（比如沙箱、
+       或者权限被裁剪的会话）下 Get-ScheduledTask 会直接失败，
+       但 schtasks 还能问到。
+    注意：调用外部命令（schtasks）失败时 PowerShell 会往 stderr 写东西，
+    而本脚本设了 $ErrorActionPreference = 'Stop'，会被当成终止性错误中断整个脚本。
+    所以这里必须临时放宽，否则"查不到任务"会让状态查询直接崩掉。
+  #>
+  $taskFound = $null
+  $taskState = ''
+  $probeFailed = $false
+
   $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($task) {
+    $taskFound = $true
+    $taskState = $task.State
     $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
-    Write-Ok "已注册开机自启（状态：$($task.State)）"
     if ($info -and $info.LastRunTime -gt [datetime]'2000-01-01') {
-      Write-Step "上次运行：$($info.LastRunTime)   结果：$($info.LastTaskResult)"
+      $taskState += "，上次运行 $($info.LastRunTime)"
     }
+  } else {
+    # 退回 schtasks。临时把错误偏好调成 Continue，
+    # 免得外部命令的 stderr 输出把整个脚本打断。
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      $raw = & schtasks /query /tn $TaskName 2>&1
+      if ($LASTEXITCODE -eq 0 -and "$raw" -notmatch 'ERROR|错误') {
+        $taskFound = $true
+        $taskState = '已注册（经 schtasks 确认）'
+      } else {
+        # 拿一个肯定不存在的任务做对照：报错一样就说明是环境查不到，而不是"确实没注册"
+        $probe = & schtasks /query /tn 'NonexistentProbe12345' 2>&1
+        $probeFailed = ("$probe" -eq "$raw")
+      }
+    } catch {
+      $probeFailed = $true
+    } finally {
+      $ErrorActionPreference = $saved
+    }
+  }
+
+  if ($taskFound) {
+    Write-Ok "已注册开机自启（$taskState）"
+  } elseif ($probeFailed) {
+    Write-Warn2 '查不到开机自启的状态（当前会话权限受限），没有结论'
+    Write-Step '你可以自己打开「任务计划程序」看有没有 Friend-Service'
   } else {
     Write-Warn2 '没有注册开机自启 —— 重启电脑后服务不会自己起来'
     Write-Step '在命令行里跑：friend.cmd install'

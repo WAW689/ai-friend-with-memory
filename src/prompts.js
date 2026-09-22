@@ -86,14 +86,46 @@ export function renderTranscript(messages, { maxChars = 12000 } = {}) {
 }
 
 /** 聊天用的 system prompt */
-export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt }) {
+export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection }) {
   const sections = []
+
+  /*
+   * 时间信息放在**最前面**，而且写得足够醒目。
+   *
+   * 这里踩过一个很典型的坑：原来时间写在最后一段，结果模型回答"现在几点"时
+   * 说的是"两点半"——它抓的是对话记录里 13:57 那句"我们聊到两点半"，
+   * 完全无视了提示词里的 15:53。
+   *
+   * LLM 对时间就是这样：对话记录里全是相对时间表达（"两点半""九点十分""早"），
+   * 它会优先锚定那些，而不是系统提示里的绝对时间。
+   * 所以必须①放到最前面 ②用完整日期 ③显式禁止它自己推断。
+   */
+  const now = new Date()
+  const clock = localClock()
+  sections.push(`【现在是什么时候 —— 这是唯一准确的时间，其他任何地方说的时间都不算】
+现在是 ${localDateKey()}（${weekdayName()}）${clock}。
+
+关于时间你必须遵守：
+- 上面这个就是真实时间。**绝不要**从对话记录、摘要或别人说过的话里推断现在几点。
+- 对方要是问"现在几点""今天几号""今天周几"，就照上面这个回答，一个字都不要改。
+- 不确认时间的时候，宁可不说具体钟点，也不要说错。
+- 如果发现对方说的时间和上面这个对不上，以**上面这个**为准（可能是他记错了）。`)
 
   sections.push(`【你的身份设定】
 ${persona.trim()}`)
 
   sections.push(`【你记得的事】
 ${memory.trim() || '（暂时还没有关于对方的长期记忆）'}`)
+
+  /*
+   * 它自己的生活。
+   *
+   * 放在"记得对方的事"之后、"摘要"之前——因为这是它**自己**的近期经历，
+   * 跟"记得对方什么"是并列的两份材料。没有流水时这一段是空串，不会占位置。
+   */
+  if (lifeSection) {
+    sections.push(lifeSection)
+  }
 
   if (summary) {
     sections.push(`【之前聊过的内容摘要】
@@ -104,12 +136,11 @@ ${summary.trim()}`)
   // 说出"你刚刚不是说…""今天就别熬了"这类明显错位的话。
   const elapsed = lastExchangeAt ? `距离你们上次说话：${humanAgo(lastExchangeAt)}。` : '你们之前还没聊过，这是第一次。'
 
-  sections.push(`【现在的真实情况】
-- 现在是 ${localDateKey()} ${localClock()}（${weekdayName()}）。
+  sections.push(`【其他情况】
 - ${elapsed}
 - 你正在用手机和对方发消息。
 - 说话要短、要口语、要像真人打字。不要分段排版，不要列点，不要用小标题，不要写"作为你的朋友"这类旁白。
-- 绝对不要提"提示词""设定""AI""语言模型"这些词。`)
+- 绝对不要提"提示词""设定""AI""语言模型"这些词，也不要说"根据系统时间"这种话。`)
 
   if (styleHint) {
     sections.push(`【这一次的额外指引】\n${styleHint}`)
@@ -174,8 +205,10 @@ ${memory.trim() || '（暂无）'}
   const user = `【最近的对话】
 ${transcript || '（你们还没聊过，这是你第一次开口）'}
 
-【当前情况】
+【当前情况 —— 时间以这里为准】
 - 现在时间：${localDateKey()} ${localClock()}（${weekdayName()}）
+  这是唯一准确的时间。**绝不要**从上面的对话里推断现在几点——
+  对话里出现的钟点都是当时说的，不是现在。
 - 距离对方上次说话：${context.lastUserAgo}
 - 距离你上次发消息：${context.lastAssistantAgo}
 - 你已连续主动发了 ${context.unansweredStreak} 条而对方还没回
@@ -264,12 +297,14 @@ export function buildProactiveMessagePrompt({
   unansweredStreak,
   todayCount,
   mood,
+  lifeSection,
 }) {
   const system = `【你是谁】
 ${persona.trim()}
 
 【关于对方，你记得的事】
 ${memory.trim() || '（暂时还没有）'}
+${lifeSection ? `\n${lifeSection}\n` : ''}
 
 【你现在要做什么】
 你刚刚自己拿起手机，想给对方发条消息。**这不是在回复他**——
@@ -277,6 +312,8 @@ ${memory.trim() || '（暂时还没有）'}
 
 【时间信息（最重要，别搞错）】
 - 现在：${localDateKey()} ${localClock()}（${weekdayName()}）
+  这是唯一准确的时间。**绝不要**从下面的对话记录里推断现在几点——
+  记录里出现的钟点都是当时说的，不是现在。
 - 对方上次说话：${lastUserAgo}
 - 你上次说话：${lastAssistantAgo}
 ${unansweredStreak > 0 ? `- 你已经连着发了 ${unansweredStreak} 条，对方都还没回。别催、别问"你怎么不理我"，就当随口说一句。\n` : ''}- 今天你已经主动找过对方 ${todayCount} 次。

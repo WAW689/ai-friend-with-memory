@@ -7,6 +7,8 @@
  * 用服务端实测过的真实节奏来跑，而不是假设一个理想的流。
  * 用法：node test/typing-animation.js
  */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import { renderTranscript } from '../src/prompts.js'
 
 /* ------------------------------------------------ 复刻前端算法（保持同步） */

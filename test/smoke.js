@@ -3,6 +3,9 @@
  * 用法：node src/cli.js 之外，单独开一个终端 node test/smoke.js
  * 前提：服务已经在 8787 端口跑着。
  */
+
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 const BASE = process.env.BASE ?? 'http://127.0.0.1:8787'
 // 用 || 而不是 ??：worker 里可能传进来一个空字符串，那样要回退到 argv
 const TOKEN = process.env.FRIEND_ACCESS_TOKEN || process.argv[2]

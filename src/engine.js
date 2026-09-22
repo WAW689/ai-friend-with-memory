@@ -11,6 +11,7 @@ import { complete, completeJson, extractJson, streamChat } from './llm.js'
 import { push, recordPush } from './bark.js'
 import { runBackup } from './backup.js'
 import { readRecentImages, saveImage } from './images.js'
+import { buildLifeSection, readJournal, shouldLive, liveOneRound } from './life.js'
 import {
   buildChatSystemPrompt,
   buildMemoryPrompt,
@@ -140,6 +141,8 @@ function buildContext(cfg) {
     persona: readPersona(),
     memory: readMemory(),
     summary: summary.text,
+    // 它自己的生活（不在聊天时也过日子），没有流水时是空串
+    lifeSection: buildLifeSection(),
     recent,
     lastUserMessageAt: lastUser?.at ?? 0,
     lastAssistantMessageAt: lastAssistant?.at ?? 0,
@@ -254,7 +257,6 @@ export async function respond(text, hooks = {}) {
     },
     ...ctx.recent.map(toModelMessage),
   ]
-
   store.state.generating = true
   store.saveState()
 

@@ -1,4 +1,6 @@
 /** 前端接线自检：确认滚动修复涉及的元素、样式、函数都在 */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import fs from 'node:fs'
 
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8')

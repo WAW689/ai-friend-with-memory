@@ -22,7 +22,9 @@ logs/
 # 测试用的临时数据目录
 # 测试会把种子数据写在这里。虽然只是测试数据，
 # 但测试会复制真实的 persona.md / memory.md 进来——那是私密内容。
+# tmp/ 是聚合器共享的；tmp-<套件名>/ 是单独跑某个测试文件时各自隔离的。
 test/tmp/
+test/tmp-*/
 
 # 编辑器 / 系统垃圾
 .vscode/
@@ -32,6 +34,6 @@ Thumbs.db
 *.tmp
 *.swp
 
-# �ύ��Ϣ����ʱ�ļ�
+# 提交信息的临时文件
 .git-commit-msg.txt
 .msg.tmp

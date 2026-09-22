@@ -35,6 +35,10 @@ export const PATHS = {
   summary: path.join(DATA_DIR, 'summary.json'),
   messages: path.join(DATA_DIR, 'messages.jsonl'),
   state: path.join(DATA_DIR, 'state.json'),
+  // 它自己的生活
+  life: path.join(DATA_DIR, 'life.md'),
+  journal: path.join(DATA_DIR, 'life.jsonl'),
+  lifeArcs: path.join(DATA_DIR, 'life-arcs.json'),
   public: path.join(ROOT, 'public'),
 }
 
@@ -148,6 +152,18 @@ const DEFAULTS = {
     // 每积累多少条消息，让模型抽取一次记忆
     extractEveryMessages: 24,
   },
+  // 它自己的生活（不在聊天时也过日子）
+  life: {
+    enabled: true,
+    // 对方安静多久之后它才"过日子"——正在聊天时突然有经历叫打断，不叫生活
+    minIdleMinutes: 60,
+    // 两次经历之间的最小间隔
+    minGapMinutes: 120,
+    // 超过这个间隔就一定让它经历点什么
+    maxGapMinutes: 240,
+    // 每次最多几件事
+    maxPerRun: 2,
+  },
 }
 
 /** 深合并：只覆盖用户显式写了的字段 */
@@ -218,6 +234,11 @@ function envOverride(cfg) {
 
   set(out.context, 'recentMessages', take(['FRIEND_RECENT_MESSAGES'], num))
   set(out.memory, 'extractEveryMessages', take(['FRIEND_MEMORY_EVERY'], num))
+
+  set(out.life, 'enabled', take(['FRIEND_LIFE'], bool))
+  set(out.life, 'minIdleMinutes', take(['FRIEND_LIFE_MIN_IDLE'], num))
+  set(out.life, 'minGapMinutes', take(['FRIEND_LIFE_MIN_GAP'], num))
+  set(out.life, 'maxGapMinutes', take(['FRIEND_LIFE_MAX_GAP'], num))
 
   return out
 }

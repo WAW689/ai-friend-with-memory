@@ -85,6 +85,7 @@ const OFFLINE = [
   ['未导入引用检查', 'undefined-refs.js'],
   ['消息清洗', 'message-clean.js'],
   ['提示词与时间感知', 'prompts.js'],
+  ['生活流水', 'life.js'],
   ['备份与消息序号', 'backup-and-seq.js'],
   ['逐字动画算法', 'typing-animation.js'],
   ['头像', 'avatar.js'],

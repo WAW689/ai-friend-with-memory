@@ -90,15 +90,45 @@ export function readJson(file, fallback = undefined) {
   }
 }
 
+/** 同步睡一会儿（给重试用；sleep 是异步的，这里不能 await） */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
 /**
  * 原子写：先写临时文件再 rename。
  * 断电/崩溃时不会留下半个 JSON 文件。
+ *
+ * Windows 上 rename 会偶发 EPERM：杀毒软件、搜索索引、
+ * 资源管理器预览都可能在这一瞬间占着目标文件。
+ * 这类占用通常几毫秒就释放，所以**必须重试**——
+ * 原来不重试，测试里出现过 "EPERM rename life-arcs.json.tmp-1234"
+ * 这种难复现的偶发失败。
  */
 export function writeJsonAtomic(file, value) {
   ensureDir(path.dirname(file))
   const tmp = `${file}.tmp-${process.pid}`
   fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  fs.renameSync(tmp, file)
+
+  const RETRIES = 10
+  for (let i = 0; ; i++) {
+    try {
+      fs.renameSync(tmp, file)
+      return
+    } catch (err) {
+      // 只有"被占用"才值得重试；其他错误（如目录不存在）重试也是白等
+      const transient = err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'EBUSY'
+      if (!transient || i >= RETRIES) {
+        try {
+          fs.rmSync(tmp, { force: true })
+        } catch {
+          /* 清理失败就算了，别盖住真正的错误 */
+        }
+        throw err
+      }
+      sleepSync(5 + i * 5)
+    }
+  }
 }
 
 /** 追加一行 JSONL */

@@ -6,6 +6,8 @@
  *
  * 用法：node test/vision-probe.js
  */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import { loadConfig } from '../src/config.js'
 import { shapesPng, solidPng, toDataUrl } from '../src/png.js'
 

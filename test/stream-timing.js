@@ -4,6 +4,9 @@
  *
  * 用法：node test/stream-timing.js <token> "测试内容"
  */
+
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 const token = process.argv[2]
 const text = process.argv[3] ?? '随便聊两句，看看你打字快不快'
 

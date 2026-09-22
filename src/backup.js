@@ -59,13 +59,23 @@ export function runBackup(options = {}) {
     bytes += result.size
   }
 
-  /* ---- 记忆、人设、摘要、头像 ---- */
+  /* ---- 记忆、人设、摘要、头像、生活 ---- */
   const plainFiles = [
     ['memory.md', PATHS.memory],
     ['persona.md', PATHS.persona],
     ['summary.json', PATHS.summary],
     ['avatar.json', path.join(PATHS.data, 'avatar.json')],
     ['state.json', PATHS.state],
+    /*
+     * 它自己的生活。
+     *
+     * 流水跟聊天记录一样属于"发生过就不能重来"的东西——
+     * 丢了它就会变回"今天才出生"，之前几天的经历全部作废。
+     * 生活设定也一样，那是它这个人的底子。
+     */
+    ['life.md', PATHS.life],
+    ['life-arcs.json', PATHS.lifeArcs],
+    ['life.jsonl', PATHS.journal],
   ]
   for (const [name, source] of plainFiles) {
     if (!fs.existsSync(source)) continue

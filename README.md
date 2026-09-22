@@ -328,12 +328,25 @@ node test/smoke.js <token>       # 只跑接口冒烟测试
 ### 测试
 
 ```powershell
-npm test                  # 全部（8 个套件，约 3 秒）
+npm test                  # 全部（11 个套件，约 5 秒）
 node test/all.js          # 同上
 node test/prompts.js      # 单独跑某一个
 ```
 
 测试分两类：**离线**（不调模型、不依赖服务，随时可跑）和**在线**（需要服务在跑）。
+
+测试**绝对不会碰到你的真实数据**。每个测试文件的第一个 import 都是
+`test/_bootstrap.js`，它把 `FRIEND_DATA_DIR` 指到一个隔离目录：
+
+- 跑 `npm test` → 所有套件共用 `test/tmp/`
+- 单独跑某个文件 → 各自用 `test/tmp-<套件名>/`
+
+这两类目录都在 `.gitignore` 里（里面会复制真实的 `persona.md` / `memory.md`，
+属于私密内容，**不要提交**）。
+
+> 这条不是多虑：曾经直接跑 `node test/life.js` 把真实的生活设定
+> 写成了测试夹具，聊天里的她一度"失去了身份"。`test/regressions.js`
+> 现在会检查每个测试文件都引入了引导模块。
 
 ### 推送相关
 

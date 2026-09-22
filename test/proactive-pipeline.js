@@ -11,6 +11,8 @@
  * 用法：node test/proactive-pipeline.js
  * 注意：会真的写入数据，跑完自动还原。
  */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import fs from 'node:fs'
 import { PATHS, loadConfig } from '../src/config.js'
 import {

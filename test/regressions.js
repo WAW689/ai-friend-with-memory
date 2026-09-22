@@ -6,6 +6,9 @@
  * 1. 测试污染真实数据
  *    → 测试构造状态时把用户真实的 state.json 清空，主动调度彻底停摆，
  *      还被"没排期"静默拦住，表现成"它再也不主动找我了"。
+ *    → 后来又发生一次：直接跑 test/life.js，把真实 life.md（生活设定）
+ *      写成了 86 字节的测试夹具、life.jsonl 写成一条「旧事」。
+ *      所以现在引导模块强制隔离，且有测试盯着"每个文件都得引入它"。
  *
  * 2. force 模式把用户自己的消息推给用户
  *    → 测试重复跑，用户手机上收到自己说的那句话，而且收到十几遍。
@@ -16,6 +19,8 @@
  *
  * 用法：node test/regressions.js
  */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -70,16 +75,46 @@ check('支持 FRIEND_DATA_DIR 覆盖数据目录', () => {
 
 check('当前跑在隔离目录里（不是真实 data/）', () => {
   const configured = process.env.FRIEND_DATA_DIR
-  if (!configured) {
-    // 单独跑这个文件时没有隔离，这是允许的——但要提醒
-    return '⚠ 未隔离（聚合器会设置；单独跑时无妨，本测试只读不写）'
-  }
+  /*
+   * 以前这里允许"单独跑时没隔离"，结果就是那次真实事故：
+   * 有人直接跑了 `node test/life.js`，它的 reset() 把**真实**的
+   * life.md 写成了 86 字节的测试夹具、life.jsonl 写成一条「旧事」，
+   * 连带备份里存的都是坏数据。现在 test/_bootstrap.js 保证任何
+   * 入口都有隔离，所以这里从"允许缺失"改成"必须存在"。
+   */
+  assert(configured, '没有 FRIEND_DATA_DIR —— 测试会写进真实 data/')
+
   const real = path.join(ROOT, 'data')
   assert(
     path.resolve(configured) !== path.resolve(real),
     `数据目录指向了真实目录：${configured}`,
   )
   return configured
+})
+
+check('每个测试文件都先 import 自隔离引导（关键）', () => {
+  /*
+   * PATHS 是模块加载那一刻算出来的，所以引导必须在**第一个** import。
+   * 漏掉任何一个文件，直接跑它就会污染真实数据；这条检查兜住这个。
+   */
+  const skip = new Set(['_bootstrap.js', '_harness.js', 'all.js'])
+  const files = fs.readdirSync(HERE).filter((f) => f.endsWith('.js') && !skip.has(f))
+  const missing = []
+
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(HERE, f), 'utf8')
+    const bootIdx = src.indexOf("import './_bootstrap.js'")
+    if (bootIdx === -1) {
+      missing.push(`${f}(没引入)`)
+      continue
+    }
+    // 必须排在其他 import 之前
+    const firstOther = src.search(/^import\s(?!'\.\/_bootstrap\.js')/m)
+    if (firstOther !== -1 && firstOther < bootIdx) missing.push(`${f}(位置太靠后)`)
+  }
+
+  assert(missing.length === 0, '这些文件会污染真实数据：' + missing.join('、'))
+  return `${files.length} 个文件都有引导`
 })
 
 check('测试聚合器会注入隔离目录', () => {

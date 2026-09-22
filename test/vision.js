@@ -7,6 +7,8 @@
  * 验证的是整条链路：图片存盘 → 消息里记 id → 取图接口能读回 → 模型真的看懂了。
  * 只测"接口返回 200"是不够的——那只能说明没报错，不能说明它看见了。
  */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import fs from 'node:fs'
 import { PATHS, loadConfig } from '../src/config.js'
 import { saveImage, findImage, readImageAsDataUrl, imageStats, parseDataUrl } from '../src/images.js'

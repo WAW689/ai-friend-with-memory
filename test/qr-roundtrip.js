@@ -10,6 +10,8 @@
  *
  * 用法：node test/qr-roundtrip.js
  */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import { encode, toSvg, toTerminal } from '../src/qr.js'
 
 /* ------------------------------------------------------------ GF(256) */

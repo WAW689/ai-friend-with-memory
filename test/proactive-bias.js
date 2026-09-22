@@ -8,6 +8,8 @@
  * 注意：每次抽样都会真的调用模型（有成本、也慢）。
  * 用法：node test/proactive-bias.js [每种场景的抽样次数]
  */
+import './_bootstrap.js' // 必须排第一：隔离数据目录，防止污染真实 data/
+
 import fs from 'node:fs'
 import path from 'node:path'
 import { PATHS, loadConfig } from '../src/config.js'
