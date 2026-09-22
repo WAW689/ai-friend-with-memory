@@ -28,6 +28,7 @@ import {
   writeLib,
   STICKER_LIMITS,
 } from '../src/stickers.js'
+import { findImage } from '../src/images.js'
 import { parseStickerMark, stickerGate } from '../src/engine.js'
 import { buildStickerSection } from '../src/prompts.js'
 import { store } from '../src/storage.js'
@@ -330,6 +331,47 @@ check('id 格式非法的不算数', () => {
   assert(getSticker('../etc/passwd') === null, '非法 id 被当成有效')
   assert(getSticker('') === null, '空 id 被当成有效')
   return 'ok'
+})
+
+check('findImage 能找到表情包（手机加载不出图的真事故）', () => {
+  /*
+   * 这条盯的是一个真出过的 bug：
+   *   findImage() 原来只在 data/images/按日期/ 里按 id 前缀找，
+   *   而表情包存在 data/stickers/ 里、文件名是用户原来的文件名。
+   *   结果她发出去的表情包在手机上**加载不出来**（/api/image 返回 404），
+   *   聊天里是一个破图。
+   *
+   * 消息里两类图都只记一个 id，前端统一用 /api/image?id=xxx 取，
+   * 所以 findImage 必须两个目录都认。这个接缝当时没有任何测试覆盖。
+   */
+  fs.mkdirSync(PATHS.stickers, { recursive: true })
+  const file = path.join(PATHS.stickers, 'test-sticker.png')
+  fs.writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]))
+
+  seed({ items: [{ id: 'aaaaaaaaaaaaaaaa', file: 'test-sticker.png', desc: '测试' }] })
+
+  const found = findImage('aaaaaaaaaaaaaaaa')
+  assert(found, 'findImage 找不到表情包 —— /api/image 会 404，手机上就是破图')
+  assert(path.resolve(found) === path.resolve(file), `找错了文件：${found}`)
+  return '找到了'
+})
+
+check('findImage 挡住表情包索引里的目录穿越', () => {
+  seed({ items: [{ id: 'bbbbbbbbbbbbbbbb', file: '../../config.json', desc: '坏' }] })
+  assert(findImage('bbbbbbbbbbbbbbbb') === null, '索引里的 ../ 没被拦住')
+  return '已拦住'
+})
+
+check('findImage 对普通聊天图片仍然有效', () => {
+  // 确认加了表情包分支之后没把原来的路径弄坏
+  const dir = path.join(PATHS.data, 'images', '2026-01-01')
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'cccccccccccccccc.jpg')
+  fs.writeFileSync(file, 'fake-jpeg')
+
+  const found = findImage('cccccccccccccccc')
+  assert(found, '普通聊天图片找不到了 —— 改坏了原有路径')
+  return path.basename(found)
 })
 
 check('停用后不进 enabledStickers', () => {

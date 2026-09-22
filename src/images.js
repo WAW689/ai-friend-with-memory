@@ -32,6 +32,35 @@ function dirForDate(ts = now()) {
   return path.join(IMAGE_DIR, `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`)
 }
 
+/**
+ * 表情包文件按 id 定位。
+ *
+ * 这里**故意不 import stickers.js**，而是自己读那份索引 JSON：
+ *   - 避免循环依赖（stickers.js 那边要 PATHS，将来也可能要用到图片工具）
+ *   - 这个函数在每次取图时都会走，逻辑必须自包含、看得懂
+ *
+ * 索引很小（几十条），而且只在表情包命中时才读一次，开销可以忽略。
+ * 路径必须校验前缀，挡掉 `../` 穿越——索引文件虽然是自己写的，
+ * 但用户手工编辑过就不好说了。
+ */
+function findStickerFile(id) {
+  let lib
+  try {
+    lib = JSON.parse(fs.readFileSync(PATHS.stickerLib, 'utf8'))
+  } catch {
+    return null
+  }
+
+  const item = Array.isArray(lib?.items) ? lib.items.find((it) => it && it.id === id) : null
+  if (!item?.file) return null
+
+  const root = path.resolve(PATHS.stickers)
+  const full = path.resolve(root, String(item.file))
+  if (!full.startsWith(root + path.sep)) return null
+  if (!fs.existsSync(full)) return null
+  return full
+}
+
 /** base64 解出来的实际字节数 */
 function base64Bytes(base64) {
   const padding = (base64.match(/=+$/) ?? [''])[0].length
@@ -87,11 +116,26 @@ export function saveImage(dataUrl) {
 
 /**
  * 按 id 找出图片文件。
- * 不信任调用方给的路径，只在 images 目录下按 id 前缀搜索——
- * 避免路径穿越。
+ *
+ * 两个来源，都会找：
+ *   1. data/images/按日期/ —— 聊天里发的照片，文件名是随机 id
+ *   2. data/stickers/     —— 表情包，文件名是用户原来的文件名，
+ *                            靠 stickers.json 里的 id → file 映射定位
+ *
+ * 为什么第二个必须找：消息里两类图都只记一个 id，前端统一用
+ * `/api/image?id=xxx` 取。如果这里只认 images/，表情包就会 404，
+ * 手机上是加载不出来的破图。这个坑真踩过。
+ *
+ * 不信任调用方给的路径：只按 id 在已知目录里查，不做路径拼接穿越。
  */
 export function findImage(id) {
-  if (!/^[a-f0-9]{6,32}$/.test(String(id ?? ''))) return null
+  const key = String(id ?? '')
+  if (!/^[a-f0-9]{6,32}$/.test(key)) return null
+
+  // 表情包：id 是内容哈希，跟文件名没关系，必须查索引
+  const sticker = findStickerFile(key)
+  if (sticker) return sticker
+
   let days
   try {
     days = fs.readdirSync(IMAGE_DIR, { withFileTypes: true }).filter((e) => e.isDirectory())
@@ -107,7 +151,7 @@ export function findImage(id) {
     } catch {
       continue
     }
-    const hit = files.find((f) => f.startsWith(id))
+    const hit = files.find((f) => f.startsWith(key))
     if (hit) return path.join(dir, hit)
   }
   return null
