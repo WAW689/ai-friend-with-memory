@@ -60,6 +60,7 @@ import {
   writeLib,
 } from './stickers.js'
 import { store, toWireMessage } from './storage.js'
+import { stateForUI } from './status.js'
 import { appendJsonl, contentHash, ensureDir, log, now, truncate } from './util.js'
 
 const MIME = {
@@ -96,7 +97,14 @@ function broadcast(event, data) {
 /** store 有变化就通知所有在线页面 */
 export function startStoreBroadcast() {
   store.subscribe(() => {
-    broadcast('messages', store.snapshot())
+    /*
+     * 消息和她的状态一起推。
+     *
+     * 状态必须跟着消息走——不然会出现"她已经在打字了，顶部还写着在煮面"。
+     * store.notify() 在 append / markUser / saveState 时都会触发，
+     * 而"她在不在打字"正是靠 state.generating 标记的，所以这里能同步上。
+     */
+    broadcast('messages', { ...store.snapshot(), state: stateForUI(loadConfig()) })
   })
 }
 
@@ -247,6 +255,13 @@ async function handleApi(req, res, url, cfg) {
       // "在看"只由前端主动发的心跳（POST /api/ping）来标记。
       return sendJson(res, 200, {
         snapshot: store.snapshot(),
+        /*
+         * 她此刻的状态。顶部那行字靠它。
+         *
+         * 放在这里而不是塞进 snapshot 里，是因为 snapshot 是**消息**快照
+         * （storage 的事），而这是"她这个人现在怎么样"（status 的事）。
+         */
+        state: stateForUI(cfg),
         config: publicConfig(cfg),
         persona: readPersona(),
         // 界面顶部的名字：从人设里解析，人设改了这里就跟着改

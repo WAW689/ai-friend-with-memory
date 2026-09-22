@@ -19,6 +19,9 @@ const S = {
   selfChanges: [],
   selfSnapshots: [],
   selfEnabled: true,
+  // 她此刻的状态（服务端算好给的）+ SSE 是否断开
+  state: null,
+  esDown: false,
   // 表情包
   stickers: [],
   stickerEnabled: true,
@@ -529,6 +532,8 @@ async function loadApp() {
   S.memory = data.memory
   S.self = data.self ?? ''
   S.selfEnabled = data.selfEnabled !== false
+  // 她此刻的状态。顶部那行字靠它。
+  S.state = data.state ?? null
   S.summary = data.summary
   S.readiness = data.readiness
   hideGate()
@@ -538,6 +543,7 @@ async function loadApp() {
   renderAll({ force: true })
   connectEvents()
   startHeartbeat()
+  startStateRefresh()
   updateStatus()
 }
 
@@ -966,31 +972,95 @@ function connectEvents() {
     const previousLastSeq = S.lastSeq
     S.messages = snap.messages
     S.lastSeq = snap.lastSeq
+    /*
+     * 她的状态跟着消息一起到。
+     * 不更新的话会出现"她已经在打字了，顶部还写着在煮面"。
+     */
+    if (snap.state) {
+      S.state = snap.state
+      updateStatus()
+    }
     renderMessages({ animate: true, animateFromSeq: previousLastSeq })
     if (snap.unread > 0 && document.visibilityState === 'visible') markRead()
   })
 
   es.onopen = () => {
-    setStatus('在线', true)
+    S.esDown = false
+    // 不要在这里写"在线"——那会把她的真实状态（睡了/在忙）盖掉。
+    // 状态只由服务端给的 state 决定，这里只负责清掉"断开"标记。
+    updateStatus()
   }
   es.onerror = () => {
-    setStatus('连接断开，重连中…', false)
+    S.esDown = true
+    updateStatus()
     // EventSource 自己会重连，这里不用手动处理
   }
 }
 
-function setStatus(text, live) {
+function setStatus(text, live, stateKey) {
   const el = $('status')
   el.textContent = text
   el.classList.toggle('live', Boolean(live))
+  /*
+   * data-state 必须每次都重置。
+   * 不重置的话，从"在煮面"切到"连接断开"时旧的 data-state='busy' 还留着，
+   * CSS 的橙色会盖住"断开"该有的样式——界面上看就是"断线了但显示成在忙"。
+   */
+  if (stateKey) el.dataset.state = stateKey
+  else delete el.dataset.state
 }
 
+/**
+ * 顶部那行状态。
+ *
+ * 以前永远写着"在线"——那是最糟的一种写法：
+ * 她没回消息的时候，你只能猜是不是自己说错了什么。
+ * 现在它说的是**她真实在干什么**（在煮面 / 困得不行了 / 睡了），
+ * 于是"她没回我"从悬念变成了信息。
+ *
+ * 三种情况优先级（高到低）：
+ *   1. 连接有问题 / 配置没补齐 → 这些是**系统状态**，比她在干嘛更要紧
+ *   2. 服务端给的 herState（正在输入 / 睡了 / 在忙 / 在的）
+ *   3. 拿不到就退回旧文案，别让界面空着
+ */
 function updateStatus() {
   const p = S.config?.proactive
-  if (!p) return
-  if (!p.enabled) return setStatus('主动消息已关闭', false)
-  if (S.readiness.length) return setStatus('等你补齐设置', false)
+
+  // 连接断了先说连接。这条比"她在忙"重要得多——不然你会以为她不理你。
+  if (S.esDown) return setStatus('连接断开，重连中…', false)
+  if (S.readiness?.length) return setStatus('等你补齐设置', false)
+
+  const st = S.state
+  if (st?.label) {
+    // 状态栏只放主文案；细节（"8 分钟前记下"）放 title，长按能看到
+    setStatus(st.label, st.key !== 'asleep', st.key)
+    $('status').title = st.detail || ''
+    return
+  }
+
+  if (p && !p.enabled) return setStatus('主动消息已关闭', false)
   setStatus('在线', true)
+}
+
+/**
+ * 状态会**随时间自己变**（比如从"困得不行了"变成"睡了"），
+ * 而那时候不一定有新消息、也就没有 SSE 推送。
+ * 所以每隔一会儿自己去问一次。
+ */
+function startStateRefresh() {
+  const pull = () => {
+    if (document.visibilityState !== 'visible') return
+    api('/api/app')
+      .then((data) => {
+        if (data.state) {
+          S.state = data.state
+          updateStatus()
+        }
+      })
+      .catch(() => {})
+  }
+  clearInterval(startStateRefresh._timer)
+  startStateRefresh._timer = setInterval(pull, 60000)
 }
 
 /**

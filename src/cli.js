@@ -470,6 +470,22 @@ const commands = {
     console.log(`  ${verdict.level === 'bad' ? '✗' : '✓'} ${verdict.text}`)
     console.log('')
 
+    /*
+     * 顶栏状态也打出来。
+     * 它跟提示词无关，所以不在上面那十段里；但它决定了用户
+     * 怎么理解"她没回消息"，值得单独看一眼。
+     */
+    const { herState } = await import('./status.js')
+    const st = herState(cfg)
+    console.log('  ── 她现在的状态（手机顶栏显示的就是这个）──')
+    console.log('')
+    console.log(`  ${st.label}${st.detail ? '   —— ' + st.detail : ''}`)
+    console.log(`  （状态标识：${st.key}）`)
+    console.log('')
+    console.log('  这行字决定你怎么理解"她没回消息"：显示"在的"就是没在忙，')
+    console.log('  显示"在煮面"就是她手上占着。它和回复延迟用的是**同一份判断**。')
+    console.log('')
+
     console.log('  ── 规模 ──')
     console.log('')
     console.log(`  系统提示词      ${realPrompt.length} 字，约 ${estimateTokens(realPrompt)} token`)

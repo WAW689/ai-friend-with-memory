@@ -136,6 +136,24 @@ const stickerChecks = [
   ['描述编辑用事件委托（重建后不失效）', /dataset\?\.stickerDesc/.test(js)],
 ]
 
+// 顶部状态栏
+//
+// 这行字决定用户怎么理解"她没回消息"。少一个环节就会退化成永远显示"在线"——
+// 那正好把"她会去忙、会困"这两个功能在界面上的效果全部抵消。
+const statusChecks = [
+  ['JS 从服务端拿 state', /S\.state = data\.state/.test(js)],
+  ['SSE 推送里带 state', /if \(snap\.state\)/.test(js)],
+  ['连接断开时优先报断开', /S\.esDown[\s\S]{0,80}连接断开/.test(js)],
+  ['onopen 不再写死"在线"', !/es\.onopen = \(\) => \{\s*setStatus\('在线'/.test(js)],
+  ['setStatus 支持状态样式', /function setStatus\(text, live, stateKey\)/.test(js)],
+  ['data-state 每次重置（防旧样式残留）', /delete el\.dataset\.state/.test(js)],
+  ['状态会定时自己刷新（时间会流逝）', /function startStateRefresh/.test(js)],
+  ['启动时开启状态刷新', /startStateRefresh\(\)/.test(js)],
+  ['CSS 有 typing 状态样式', /\[data-state='typing'\]/.test(css)],
+  ['CSS 有 asleep 状态样式', /\[data-state='asleep'\]/.test(css)],
+  ['状态栏会截断而不是撑破顶栏', /\.status[\s\S]{0,240}text-overflow: ellipsis/.test(css)],
+]
+
 let failed = 0
 for (const [name, ok] of checks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
@@ -174,6 +192,12 @@ for (const [name, ok] of selfChecks) {
 
 console.log('\n表情包')
 for (const [name, ok] of stickerChecks) {
+  console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
+  if (!ok) failed++
+}
+
+console.log('\n顶栏状态')
+for (const [name, ok] of statusChecks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
   if (!ok) failed++
 }

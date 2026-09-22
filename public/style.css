@@ -152,8 +152,35 @@ html, body {
 }
 .who-text { min-width: 0; }
 .name { font-weight: 600; font-size: 16px; }
-.status { font-size: 12px; color: var(--text-dim); }
+
+/*
+ * 她此刻的状态。
+ *
+ * 颜色只做**很轻的**区分，不要做成 IM 那种"绿点=在线/灰点=离线"：
+ * 那套语汇的意思是"我随时待命"，正好是我们想摆脱的东西。
+ * 这里只用颜色的细微差别提示"她现在方便吗"，不抢名字的注意力。
+ */
+.status {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 62vw;
+}
+/* 空闲：稍微亮一点，表示她在 */
 .status.live { color: #34d399; }
+/* 正在输入：跟着主题色走，一眼能看出"她在回你" */
+.status[data-state='typing'] { color: var(--accent); }
+/* 忙：中性偏暖，说明"她在做事，不是不理你" */
+.status[data-state='busy'] { color: #f59e0b; }
+/* 能看手机：介于忙和空闲之间 */
+.status[data-state='around'] { color: #a3a3a3; }
+/* 困了：低饱和，略暗 */
+.status[data-state='sleepy'] { color: #8b93a1; font-style: italic; }
+/* 睡了：最暗，但不做成"勿扰"那种拒绝感 */
+.status[data-state='asleep'] { color: #6b7280; opacity: 0.9; }
+
 .topbar-actions { display: flex; gap: 4px; }
 .icon-btn {
   width: 36px; height: 36px;
