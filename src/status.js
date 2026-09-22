@@ -167,8 +167,16 @@ export function herState(cfg, { at = now(), generating = false } = {}) {
     }
   }
 
-  // 3) 快睡了——不拦消息，只是让你知道她状态
-  if (cfg?.sleepy?.enabled !== false && sleepy.level >= 0.9) {
+  /*
+   * 3) 快睡了。
+   *
+   * 门槛是 0.5 而不是 0.9。踩过一次：0.9 对应"睡前 45 分钟"，
+   * 而她 3 点睡，所以只有凌晨 2:15 之后才显示困——
+   * 用户 22:00、0:00、1:00 看到的全是"在的"，这个状态等于不存在。
+   *
+   * 0.5 对应"睡前两小时"（凌晨 1 点之后），那时候确实该困了。
+   */
+  if (cfg?.sleepy?.enabled !== false && sleepy.level >= 0.5) {
     return { key: 'sleepy', label: '困得不行了', detail: '回得会慢，别嫌我', since: at }
   }
 

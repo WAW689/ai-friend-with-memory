@@ -282,6 +282,63 @@ check('困劲儿是 0-1 之间的数', () => {
   return '24 个小时都在 0-1'
 })
 
+check('睡前时段不能有断层（awakeSpan 算反过的真实 bug）', () => {
+  /*
+   * 这条盯的是一个很典型、用户直接看得见的 bug：
+   *
+   * 她 3 点睡、12 点起，清醒时长是 **9 小时**（12:00 → 次日 3:00）。
+   * 但代码里写成了 `awakeSpan = 24 - sleepSpan = 15`——
+   * 于是"睡前两小时"被推到"清醒了 13 小时"，而那已经是早上 10 点，
+   * **她早睡着了**。
+   *
+   * 后果：22:00、0:00、1:00、2:00 全显示"清醒"，3:00 突然跳到"睡了"，
+   * 中间那几小时的困劲儿整个丢掉。用户看到的就是
+   * "状态栏怎么一直没反应"。
+   *
+   * 正确的算法是 `awakeSpan = rel(sleepHour, wakeHour)`。
+   */
+  const w = parseSleepWindow('凌晨三点睡，中午十二点起')
+  const s = {}
+  for (let h = 0; h < 24; h++) s[h] = sleepiness({ at: at(h), window: w })
+
+  // 睡前那几小时必须已经有困意，不能是"清醒"
+  for (const h of [1, 2]) {
+    assert(s[h].level > 0, `${h}:00 应该困了，实际「${s[h].label}」`)
+  }
+  // 白天必须清醒（别矫枉过正把下午也弄困了）
+  for (const h of [13, 16, 19]) {
+    assert(s[h].level === 0, `${h}:00 应该清醒，实际「${s[h].label}」`)
+  }
+  // 睡着的那几小时必须是睡
+  for (const h of [4, 7, 10]) {
+    assert(s[h].isAsleepPeriod, `${h}:00 应该在睡觉时段`)
+  }
+  return '睡前有困意、白天清醒、睡着是睡'
+})
+
+check('困 → 睡 连续，中间不跳空', () => {
+  /*
+   * 上面那条测"某个点对不对"，这条测**过渡**：
+   * 从清醒到睡着之间不该存在一段"既不清醒也不困"的空档。
+   * 那个空档正是 awakeSpan 算错时的表现。
+   */
+  const w = parseSleepWindow('凌晨三点睡，中午十二点起')
+  const states = []
+  for (let h = 0; h < 24; h++) {
+    const r = sleepiness({ at: at(h), window: w })
+    states.push({ h, level: r.level, asleep: r.isAsleepPeriod })
+  }
+
+  for (let i = 1; i < states.length; i++) {
+    const prev = states[i - 1]
+    const cur = states[i]
+    if (!prev.asleep && cur.asleep) {
+      assert(prev.level > 0, `从 ${prev.h}:00（清醒）直接跳到 ${cur.h}:00（睡着），中间没有过渡`)
+    }
+  }
+  return '过渡连续'
+})
+
 console.log('\n睡觉时段的行为\n')
 
 check('清醒时是空串，不注入', () => {

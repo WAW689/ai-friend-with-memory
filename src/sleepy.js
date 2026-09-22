@@ -155,8 +155,20 @@ export function sleepiness({ at = now(), window, wakeHour: wakeOverride } = {}) 
   let level
   let label
   if (!isAsleepPeriod) {
-    // 距下次入睡还有多久：从起床到现在走了多久，离总清醒时长还差多少
-    const awakeSpan = 24 - span
+    /*
+     * 距下次入睡还有多久。
+     *
+     * awakeSpan 必须是"从起床到入睡"这段清醒时长，也就是
+     * `rel(sleepHour, wakeHour)`——**不是** `24 - span`。
+     *
+     * 这个算错过一次，后果很典型：她 3 点睡、12 点起，
+     * 真清醒时长是 9 小时（12:00 → 次日 3:00）。
+     * 写成 `24 - 9 = 15` 之后，"睡前两小时"被推到"清醒了 13 小时"，
+     * 而那已经是早上 10 点——**她早睡着了**。
+     * 结果就是 22:00、0:00、1:00 全显示"在的"，3:00 突然跳到"睡了"，
+     * 睡前那段困劲儿永远看不到。
+     */
+    const awakeSpan = rel(sleepHour, wakeHour)
     const hoursAwake = rel(hour, wakeHour)
     const untilSleep = awakeSpan - hoursAwake
 
