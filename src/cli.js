@@ -11,6 +11,8 @@
  *   node src/cli.js wake --force           跳过所有判断，强制它发一条
  *   node src/cli.js token                  显示访问口令
  */
+import { spawnSync } from 'node:child_process'
+import http from 'node:http'
 import { checkReadiness, loadConfig, saveConfig, PATHS } from './config.js'
 import { testPush, push } from './bark.js'
 import { BACKUP_ROOT, listBackups, runBackup } from './backup.js'
@@ -34,6 +36,22 @@ function mask(value, keep = 6) {
   if (!s) return '（未设置）'
   if (s.length <= keep * 2) return `${s.slice(0, 3)}***`
   return `${s.slice(0, keep)}…${s.slice(-4)}`
+}
+
+/**
+ * 跑一个外部命令并把输出当文本拿回来。
+ *
+ * schtasks 在中文 Windows 上输出 GBK，所以显式按 gbk 解码——
+ * 用默认的 utf8 会得到一串乱码，正则匹配不上任何字段。
+ */
+function execText(file, args) {
+  const r = spawnSync(file, args, { encoding: 'buffer', timeout: 15000 })
+  const buf = Buffer.concat([r.stdout ?? Buffer.alloc(0), r.stderr ?? Buffer.alloc(0)])
+  try {
+    return new TextDecoder('gbk').decode(buf)
+  } catch {
+    return buf.toString('utf8')
+  }
 }
 
 /** cctl 的稳定输出格式：每行 "KEY|值"，多行值用 \n 转义 */
@@ -507,6 +525,110 @@ const commands = {
   },
 
   /**
+   * 常驻自检：服务在不在、开机自启配得对不对。
+   *
+   * 为什么单独一条命令：这个项目踩过一个很隐蔽的坑——
+   * 计划任务报"成功（结果码 0）"，但服务根本没起来，用户 9 小时后才发现。
+   * 根因是任务动作是"跑一个脚本，脚本 spawn node 后自己退出"，
+   * 于是"挂了自动重启"的保护完全作用不到服务上。
+   * 这条命令就盯这个：把"服务在不在"和"任务到底怎么配的"一起打出来。
+   */
+  async service() {
+    const { checkReadiness } = await import('./config.js')
+
+    const probe = () =>
+      new Promise((resolve) => {
+        const req = http.request(
+          { host: '127.0.0.1', port: cfg.port, path: '/api/health', method: 'GET', timeout: 3000 },
+          (res) => {
+            res.resume()
+            resolve(res.statusCode === 200)
+          },
+        )
+        req.on('error', () => resolve(false))
+        req.on('timeout', () => {
+          req.destroy()
+          resolve(false)
+        })
+        req.end()
+      })
+
+    const up = await probe()
+
+    console.log('')
+    console.log(`  服务          ${up ? '✓ 在跑' : '✗ 没在跑'}`)
+    console.log(`  监听端口      ${cfg.port}`)
+    console.log('')
+
+    if (!up) {
+      console.log('  服务没在跑。启动它：')
+      console.log('    .\\friend.cmd bg')
+      console.log('')
+    }
+
+    console.log('  ── 开机自启 ──')
+    console.log('')
+
+    let taskOut = ''
+    try {
+      taskOut = execText('schtasks', ['/query', '/tn', 'Friend-Service', '/fo', 'LIST', '/v'])
+    } catch (err) {
+      taskOut = `查询失败：${err.message}`
+    }
+
+    if (!/Friend-Service|朋友/i.test(taskOut)) {
+      console.log('  ✗ 没有注册（重启电脑后不会自动起）')
+      console.log('')
+      console.log('    注册它（会弹 UAC）：')
+      console.log('      .\\friend.cmd install')
+      console.log('')
+      return
+    }
+
+    const pick = (patterns) => {
+      for (const p of patterns) {
+        const m = taskOut.match(p)
+        if (m) return m[1].trim()
+      }
+      return ''
+    }
+
+    const runLine = pick([/要运行的任务:\s*(.+)/, /Task To Run:\s*(.+)/])
+    const lastResult = pick([/上次运行结果:\s*(\S+)/, /Last Result:\s*(\S+)/])
+    const lastRun = pick([/上次运行时间:\s*(.+)/, /Last Run Time:\s*(.+)/])
+
+    console.log('  任务          Friend-Service 已注册')
+    if (lastRun) console.log(`  上次运行      ${lastRun}`)
+    if (lastResult) console.log(`  上次结果      ${lastResult}${lastResult === '0' ? '（成功）' : ''}`)
+    console.log('')
+
+    if (runLine) {
+      console.log(`  任务动作      ${runLine.slice(0, 90)}`)
+      console.log('')
+      if (/node(\.exe)?["\s].*server\.js/i.test(runLine) || /node(\.exe)?\s+src[\\/]server\.js/i.test(runLine)) {
+        console.log('  ✓ 动作直接跑 node —— 进程归任务计划程序托管，挂了会自动重拉')
+      } else {
+        console.log('  ⚠ 动作不是直接跑 node，而是跑一个脚本。')
+        console.log('    这个配置有个陷阱：脚本 spawn 出 node 之后自己就退出了，')
+        console.log('    "挂了自动重启"的保护作用在那个脚本上，**管不到服务**。')
+        console.log('    表现就是"任务显示成功，但服务其实没起来"。')
+        console.log('')
+        console.log('    修法（重新注册成直接跑 node）：')
+        console.log('      .\\friend.cmd install')
+      }
+    }
+    console.log('')
+
+    const readiness = checkReadiness(cfg)
+    if (readiness.length) {
+      console.log('  ── 配置还有问题 ──')
+      console.log('')
+      for (const r of readiness) console.log('  · ' + r)
+      console.log('')
+    }
+  },
+
+  /**
    * 看"她眼里的现在"是什么样。
    *
    * 这个命令的价值在于：她会不会说错日期、会不会把中秋说成别的日子、
@@ -709,6 +831,7 @@ async function main() {
 朋友 · 命令行工具
 
   check              检查配置是否完整
+  service            服务在不在 + 开机自启配得对不对
   now                看"她眼里的现在"：日期、农历、节日、天气、昼夜
   status             看当前主动消息的排期和拦截原因
   key <sk-xxx>       设置 DeepSeek API Key

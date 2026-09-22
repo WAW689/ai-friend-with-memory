@@ -211,13 +211,39 @@ function Install-Autostart {
   $node = Get-NodePath
   if (-not $node) { Write-Err '找不到 node.exe，无法注册'; exit 1 }
 
-  $scriptPath = Join-Path $Root 'start-friend.ps1'
-  $argLine = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -Background"
+  $serverPath = Join-Path $Root 'src\server.js'
+  if (-not (Test-Path $serverPath)) { Write-Err "找不到 $serverPath"; exit 1 }
 
-  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argLine -WorkingDirectory $Root
+  <#
+    让计划任务**直接跑 node**，不要再套一层"脚本 spawn 一个脱离的进程"。
 
-  # 登录时启动
-  $trigger = New-ScheduledTaskTrigger -AtLogOn
+    为什么必须这么改（这是线上真的踩到的故障）：
+      原来动作是 `powershell -File start-friend.ps1 -Background`，
+      而 -Background 内部用 Start-Process 起 node 后**自己立刻退出**。
+      任务计划程序看到脚本退出了，就认为这次运行结束了——
+      它管的是那个 powershell，不是被 spawn 出去的 node。
+      于是"挂了自动重启 999 次"的保护**完全作用不到服务上**。
+      实测：机器重启后任务报"成功（结果码 0）"，但服务根本没起来，
+      用户 9 小时后才发现打不开。
+
+    现在动作是 `node src/server.js`：
+      · 进程归任务计划程序托管，被杀会自动重拉（RestartCount/RestartInterval 生效）
+      · 不用再 spawn，少一层不可靠的中间环节
+      · server.js 自己会把日志写到 logs/，不用 shell 重定向
+  #>
+  $action = New-ScheduledTaskAction -Execute $node -Argument 'src/server.js' -WorkingDirectory $Root
+
+  <#
+    两个触发器：
+      · 开机（不需要等人登录，服务更早可用）
+      · 登录（开机那次万一没跑起来，登录再补一次）
+    加 30 秒延迟是等网络就绪——服务启动时会验模型和推送，太早会失败。
+  #>
+  $triggers = @(
+    (New-ScheduledTaskTrigger -AtStartup),
+    (New-ScheduledTaskTrigger -AtLogOn)
+  )
+  foreach ($t in $triggers) { $t.Delay = 'PT30S' }
 
   # 挂了自动重拉：每 5 分钟检查一次，最多重试 999 次
   $settings = New-ScheduledTaskSettingsSet `
@@ -236,14 +262,17 @@ function Install-Autostart {
   }
 
   Register-ScheduledTask -TaskName $TaskName `
-    -Action $action -Trigger $trigger -Settings $settings -Principal $principalObj `
+    -Action $action -Trigger $triggers -Settings $settings -Principal $principalObj `
     -Description '朋友：一个会主动找你聊天的 AI，本地常驻服务' | Out-Null
 
   Write-Ok "已注册开机自启：$TaskName"
-  Write-Step '下次登录 Windows 时会自动启动，并且挂了会自动重启'
+  Write-Step "动作：$node src/server.js（工作目录 $Root）"
+  Write-Step '开机和登录时都会自动启动，而且进程由任务计划程序托管——挂了会自动重拉'
   Write-Host ''
-  Write-Step '现在就启动它：'
-  Write-Step "  .\start-friend.ps1 -Background"
+  Write-Step '现在就启动它（不用等下次开机）：'
+  Write-Step "  Start-ScheduledTask -TaskName $TaskName"
+  Write-Step '或者直接后台起：'
+  Write-Step '  .\start-friend.ps1 -Background'
 }
 
 function Uninstall-Autostart {

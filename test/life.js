@@ -236,21 +236,39 @@ console.log('\n触发时机\n')
 const { shouldLive } = await import('../src/life.js')
 const cfg = loadConfig()
 
+/*
+ * 一个**非静默**的参考时刻。
+ *
+ * 这几条检查都要断言"不触发的**具体理由**"，可 shouldLive 会先查静默时段。
+ * 如果直接用真实时钟，晚上 22 点之后跑就会先撞上静默时段，
+ * 理由变成"静默时段"，断言全错。
+ *
+ * 这个坑在这个文件里踩过两次了（另两条同类检查也栽在真实时钟上）。
+ * 统一做法：日志时间和"现在"都从这个锚点推出来。
+ */
+function quietFreeMoment() {
+  const d = new Date()
+  d.setHours(15, 0, 0, 0)
+  return d.getTime()
+}
+
 check('用户刚说过话时不触发生成（关键）', () => {
   /*
    * 用户正在聊天，它却"经历"了一件事——那是打断，不是生活。
    * 这条规则如果不生效，会出现"你刚说完话它突然说刚才去买了菜"这种诡异情况。
    */
-  reset({ journal: [{ at: Date.now() - 5 * HOUR, text: '旧事' }] })
-  const verdict = shouldLive(cfg, { lastUserMessageAt: Date.now() - 5 * 60 * 1000 })
+  const anchor = quietFreeMoment()
+  reset({ journal: [{ at: anchor - 5 * HOUR, text: '旧事' }] })
+  const verdict = shouldLive(cfg, { lastUserMessageAt: anchor - 5 * 60 * 1000 }, anchor)
   assert(!verdict.ok, `不该触发，实际：${JSON.stringify(verdict)}`)
   assert(/还在说话/.test(verdict.reason), `理由不对：${verdict.reason}`)
   return verdict.reason
 })
 
 check('距上次经历太近时不触发', () => {
-  reset({ journal: [{ at: Date.now() - 10 * 60 * 1000, text: '刚发生' }] })
-  const verdict = shouldLive(cfg, { lastUserMessageAt: Date.now() - 10 * HOUR })
+  const anchor = quietFreeMoment()
+  reset({ journal: [{ at: anchor - 10 * 60 * 1000, text: '刚发生' }] })
+  const verdict = shouldLive(cfg, { lastUserMessageAt: anchor - 10 * HOUR }, anchor)
   assert(!verdict.ok, '不该触发')
   assert(/距上次经历/.test(verdict.reason), `理由不对：${verdict.reason}`)
   return verdict.reason
