@@ -390,6 +390,73 @@ const commands = {
     console.log('')
   },
 
+  /**
+   * 看"她眼里的现在"是什么样。
+   *
+   * 这个命令的价值在于：她会不会说错日期、会不会把中秋说成别的日子、
+   * 会不会在大白天说"大半夜的"——这些都能在这里一眼看出来，
+   * 不用去翻提示词拼装代码。
+   */
+  async now() {
+    const cfg = loadConfig()
+    const { describeNow, solarToLunar, nextHoliday, holidayOn } = await import('./almanac.js')
+    const { getWeather, describeWeather, peekSunTimes } = await import('./weather.js')
+
+    // 命令行下可以真的联网取一次（比聊天路径更宽松）
+    const w = await getWeather(cfg, { force: args.includes('--refresh') })
+    const sun = w?.sunrise ? { sunrise: w.sunrise, sunset: w.sunset } : peekSunTimes()
+
+    console.log('')
+    console.log('  ── 她眼里的现在 ──')
+    for (const line of describeNow(new Date(), sun).split('\n')) console.log('  ' + line)
+    console.log('')
+
+    console.log('  ── 天气 ──')
+    if (!cfg.weather.enabled) {
+      console.log('  已关闭（FRIEND_WEATHER=0）')
+    } else if (describeWeather(w)) {
+      console.log('  ' + describeWeather(w))
+      if (w.sunrise) console.log(`  日出 ${w.sunrise}  日落 ${w.sunset}`)
+      console.log(`  位置 ${cfg.weather.latitude}, ${cfg.weather.longitude}`)
+      console.log('  加 --refresh 强制重新拉一次')
+    } else {
+      console.log('  没取到（断网或接口不可用）')
+      console.log('  她不会因此说错话——拿不到就完全不提天气。')
+    }
+    console.log('')
+
+    console.log('  ── 接下来几个节日 ──')
+    /*
+     * 迭代方式要小心：不能把游标直接挪到"这个假期结束后的第一天"。
+     *
+     * 因为 nextHoliday 对"已经在放、或放到一半的假期"是**整段跳过**的
+     * （那是它该有的行为——站在假期里问"下一个节日"不该回答正在过的这个）。
+     * 但拿它来列清单时，从 9/28 往后看就会把国庆（10/1-10/7）当成
+     * "从 10/1 开始的新假期"，于是显示"还有 3 天"而不是真实的 9 天。
+     *
+     * 所以这里改成一天一天往前挪游标：跳过已经列过的那个假期的最后一天，
+     * 而不是跳到"假期结束的下一天"。
+     */
+    let cursor = new Date()
+    const listed = []
+    for (let i = 0; i < 4; i++) {
+      const next = nextHoliday(cursor)
+      if (!next) {
+        console.log('  内置数据只覆盖 2025-2026，往后的没有了（那就什么都不提）')
+        break
+      }
+      if (listed.includes(next.dateKey)) break
+      listed.push(next.dateKey)
+
+      const span = next.span > 1 ? `，放假 ${next.span} 天（到 ${next.last}）` : ''
+      console.log(`  ${next.name}  ${next.dateKey}  还有 ${next.daysAway} 天${span}`)
+
+      // 游标挪到"这个假期的最后一天"，下一次调用就会去找它之后的假期
+      cursor = new Date(new Date(next.last + 'T12:00:00').getTime())
+    }
+    console.log('')
+  },
+
   /** 列出 / 触发备份 */
   async backup() {
     const force = args.includes('--force')
@@ -526,6 +593,7 @@ async function main() {
 朋友 · 命令行工具
 
   check              检查配置是否完整
+  now                看"她眼里的现在"：日期、农历、节日、天气、昼夜
   status             看当前主动消息的排期和拦截原因
   key <sk-xxx>       设置 DeepSeek API Key
   bark <key>         设置 Bark Key 并发一条测试推送

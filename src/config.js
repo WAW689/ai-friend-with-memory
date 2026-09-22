@@ -241,6 +241,32 @@ const DEFAULTS = {
     // 每天最多几张（硬上限）
     maxPerDay: 8,
   },
+  // 天气
+  weather: {
+    /*
+     * 关掉就完全不查天气。断网环境、或者不想让她提天气的，就关了这个。
+     * 注意：关掉之后"现在算白天还是晚上"会退回到保守的小时分段判断，
+     * 不如真实日出日落准（冬天傍晚可能说错）。
+     */
+    enabled: true,
+    /*
+     * 位置。默认上海（用户所在地）。
+     *
+     * 用经纬度而不是城市名：城市名要再过一次"地名转坐标"的接口，
+     * 多一个接口就多一个失败点，而这个位置根本不会变。
+     * 上海 = 31.2304, 121.4737
+     */
+    latitude: 31.2304,
+    longitude: 121.4737,
+    /*
+     * 主动开口时要不要带天气。
+     *
+     * 单独一个开关，因为两条路的风险不同：主动开口时提一句"下雨了"
+     * 很自然，是个很好的搭话由头；但聊天回复那条路**永远不带**天气，
+     * 那样她会每句都提一句天气，立刻变成天气播报员。
+     */
+    inProactive: true,
+  },
 }
 
 /** 深合并：只覆盖用户显式写了的字段 */
@@ -325,6 +351,10 @@ function envOverride(cfg) {
   set(out.sticker, 'enabled', take(['FRIEND_STICKER'], bool))
   set(out.sticker, 'minMessagesBetween', take(['FRIEND_STICKER_MIN_GAP'], num))
   set(out.sticker, 'maxPerDay', take(['FRIEND_STICKER_MAX_PER_DAY'], num))
+
+  set(out.weather, 'enabled', take(['FRIEND_WEATHER'], bool))
+  set(out.weather, 'latitude', take(['FRIEND_LATITUDE'], num))
+  set(out.weather, 'longitude', take(['FRIEND_LONGITUDE'], num))
 
   return out
 }

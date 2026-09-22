@@ -7,6 +7,8 @@
  * 3. 记忆单独成文件，由模型自己维护，每次拼进 system prompt。
  */
 import { localClock, localDateKey, humanAgo, humanDuration, now } from './util.js'
+import { describeNow } from './almanac.js'
+import { peekSunTimes } from './weather.js'
 
 const ROLE_LABEL = { user: '对方', assistant: '我' }
 
@@ -86,7 +88,7 @@ export function renderTranscript(messages, { maxChars = 12000 } = {}) {
 }
 
 /** 聊天用的 system prompt */
-export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection, selfSection, stickerSection }) {
+export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection, selfSection, stickerSection, nowText }) {
   const sections = []
 
   /*
@@ -100,14 +102,30 @@ export function buildChatSystemPrompt({ persona, memory, summary, styleHint, las
    * 它会优先锚定那些，而不是系统提示里的绝对时间。
    * 所以必须①放到最前面 ②用完整日期 ③显式禁止它自己推断。
    */
-  const now = new Date()
-  const clock = localClock()
-  sections.push(`【现在是什么时候 —— 这是唯一准确的时间，其他任何地方说的时间都不算】
-现在是 ${localDateKey()}（${weekdayName()}）${clock}。
+  /*
+   * 时间。这是她所有时间概念的唯一来源。
+   *
+   * 有一件事必须由程序算好喂给她，不能让她自己推：**农历和节假日**。
+   * 语言模型算不准这个——它会把中秋说成随便一天、会说"周六要上班"。
+   * 这类错误用户一眼就看得出来，而且一旦说错，前面攒的"她像个真人"全塌了。
+   *
+   * "现在算白天还是晚上"同理：不能用固定小时猜。上海夏至 5 点天亮、
+   * 冬天 17 点天黑，按"6-18 点算白天"猜必然出错。所以用真实日出日落。
+   *
+   * nowText 由调用方传进来（引擎那边拿到新鲜天气后会重算一次，更准）。
+   * 没传就自己生成一份——这里**故意兜底**，因为漏传的话时间那一段会整个变空，
+   * 而"她不知道今天是几号"是最严重的退化，不该因为一个参数没传就发生。
+   */
+  const timeText = nowText || describeNow(new Date(), peekSunTimes())
 
-关于时间你必须遵守：
+  sections.push(`【现在是什么时候 —— 这是唯一准确的时间，其他任何地方说的时间都不算】
+${timeText}
+
+关于时间和日期你必须遵守：
 - 上面这个就是真实时间。**绝不要**从对话记录、摘要或别人说过的话里推断现在几点。
 - 对方要是问"现在几点""今天几号""今天周几"，就照上面这个回答，一个字都不要改。
+- **农历和节假日一律以上面写的为准**，不要自己算，也不要凭印象说。
+  上面没提到的节日就是不知道，那就别提。
 - 不确认时间的时候，宁可不说具体钟点，也不要说错。
 - 如果发现对方说的时间和上面这个对不上，以**上面这个**为准（可能是他记错了）。`)
 
@@ -181,7 +199,16 @@ function weekdayName(ts = Date.now()) {
  * 让模型决定"现在要不要主动发消息"。
  * 返回结构化判断，而不是让它直接输出消息 —— 这样我们能拦掉不合时宜的打扰。
  */
-export function buildProactiveDecisionPrompt({ persona, memory, summary, transcript, context, selfSection }) {
+export function buildProactiveDecisionPrompt({
+  persona,
+  memory,
+  summary,
+  transcript,
+  context,
+  selfSection,
+  nowText,
+  weatherSection,
+}) {
   const system = `你正在扮演一个真实的人，在判断"现在要不要主动给对方发一条消息"。
 
 【你的身份设定】
@@ -230,10 +257,7 @@ ${selfSection ? `\n${selfSection}\n` : ''}
 ${transcript || '（你们还没聊过，这是你第一次开口）'}
 
 【当前情况 —— 时间以这里为准】
-- 现在时间：${localDateKey()} ${localClock()}（${weekdayName()}）
-  这是唯一准确的时间。**绝不要**从上面的对话里推断现在几点——
-  对话里出现的钟点都是当时说的，不是现在。
-- 距离对方上次说话：${context.lastUserAgo}
+${nowText ? nowText + '\n' : ''}- 距离对方上次说话：${context.lastUserAgo}
 - 距离你上次发消息：${context.lastAssistantAgo}
 - 你已连续主动发了 ${context.unansweredStreak} 条而对方还没回
 - 今天你已经主动发了 ${context.todayCount} 次
@@ -324,7 +348,17 @@ export function buildProactiveMessagePrompt({
   lifeSection,
   selfSection,
   stickerSection,
+  nowText,
+  weatherSection,
 }) {
+  /*
+   * 时间文本在这里兜底生成。
+   *
+   * 原理由和聊天提示词那一处一样：漏传 nowText 的话，时间那一段会整个变空，
+   * 她就不知道今天几号、是不是过节。这种退化不该因为一个参数没传就发生。
+   */
+  const timeText = nowText || describeNow(new Date(), peekSunTimes())
+
   const system = `【你是谁】
 ${persona.trim()}
 
@@ -337,13 +371,13 @@ ${selfSection ? `\n${selfSection}\n` : ''}${lifeSection ? `\n${lifeSection}\n` :
 对方没有跟你说话，是你主动想开口。
 
 【时间信息（最重要，别搞错）】
-- 现在：${localDateKey()} ${localClock()}（${weekdayName()}）
-  这是唯一准确的时间。**绝不要**从下面的对话记录里推断现在几点——
-  记录里出现的钟点都是当时说的，不是现在。
+${timeText}
 - 对方上次说话：${lastUserAgo}
 - 你上次说话：${lastAssistantAgo}
 ${unansweredStreak > 0 ? `- 你已经连着发了 ${unansweredStreak} 条，对方都还没回。别催、别问"你怎么不理我"，就当随口说一句。\n` : ''}- 今天你已经主动找过对方 ${todayCount} 次。
+- 日期、农历、节假日一律以**上面这段**为准，不要自己算。
 - 今天日期和上面的日期如果不一致，说明这是新的一天，别把昨天的事当成刚发生的。
+${weatherSection ? `\n${weatherSection}\n` : ''}
 
 【说什么】
 - 一个真朋友隔了 ${lastUserAgo} 会说什么，你就说什么。

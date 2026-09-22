@@ -14,6 +14,8 @@ import { readRecentImages, saveImage } from './images.js'
 import { buildLifeSection, journalSince, readJournal, shouldLive, liveOneRound } from './life.js'
 import { buildSelfSection, evolveSelf, renderExperiences } from './self.js'
 import { markStickerUsed, stickerMenu } from './stickers.js'
+import { describeNow } from './almanac.js'
+import { buildWeatherSection, getWeather, peekSunTimes } from './weather.js'
 import {
   buildChatSystemPrompt,
   buildMemoryPrompt,
@@ -283,10 +285,22 @@ function buildContext(cfg) {
   const menu = stickerMenu()
   const stickerSection = cfg.sticker?.enabled ? buildStickerSection(menu.text) : ''
 
+  /*
+   * 时间描述。这是她所有时间概念的唯一来源。
+   *
+   * 日出日落从天气缓存里同步读（peekSunTimes），不在这里联网——
+   * 聊天路径上多一次网络请求是不能接受的，会直接拖慢每条回复。
+   * 缓存由主动开口那条路负责刷新；没有缓存时 almanac 会退回
+   * 保守的小时分段判断。
+   */
+  const nowText = describeNow(new Date(), peekSunTimes())
+
   return {
     persona: readPersona(),
     memory: readMemory(),
     summary: summary.text,
+    // 完整的时间/日期/农历/节假日/昼夜描述
+    nowText,
     // 它对自己的看法（会慢慢变），还没形成时是空串
     selfSection: buildSelfSection(),
     // 它自己的生活（不在聊天时也过日子），没有流水时是空串
@@ -599,6 +613,24 @@ export async function runProactiveCheck(options = {}) {
   }
 
   const ctx = buildContext(cfg)
+
+  /*
+   * 天气只在**主动开口**这条路上给。
+   *
+   * 这是刻意的：聊天回复里带天气，她会每句话都挂一句"今天 26 度挺舒服"，
+   * 立刻变成天气播报员，人设全崩。而主动开口时提天气是最自然的——
+   * "下雨了"本身就是个很好的搭话由头。
+   *
+   * getWeather 内部有 15 分钟缓存，而且断网/超时会静默返回缓存或 null，
+   * 不会让主动检查失败。
+   */
+  const weather = cfg.weather?.inProactive === false ? null : await getWeather(cfg)
+  ctx.weatherSection = buildWeatherSection(weather)
+  // 拿到新鲜数据后重算一次时间描述（日出日落可能比缓存里更准）
+  if (weather?.sunrise) {
+    ctx.nowText = describeNow(new Date(at), { sunrise: weather.sunrise, sunset: weather.sunset })
+  }
+
   const context = {
     lastUserAgo: humanAgo(store.state.lastUserMessageAt, at),
     lastAssistantAgo: humanAgo(store.state.lastAssistantMessageAt, at),
@@ -766,6 +798,8 @@ async function generateProactiveMessages(cfg, ctx, mood) {
     selfSection: ctx.selfSection,
     lifeSection: ctx.lifeSection,
     stickerSection: ctx.stickerSection,
+    nowText: ctx.nowText,
+    weatherSection: ctx.weatherSection,
   })
 
   try {

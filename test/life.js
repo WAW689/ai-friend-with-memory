@@ -273,27 +273,62 @@ check('没有设定时不触发', () => {
 })
 
 check('该触发的时候确实触发', () => {
-  reset({ journal: [{ at: Date.now() - 6 * HOUR, text: '半天前的事' }] })
-  // 造一个"用户很久没说话、上次经历很久以前、且不在静默时段"的时刻
-  // 静默时段是 22:00-7:00，所以挑一个中午
+  /*
+   * 造一个"用户很久没说话、上次经历很久以前、且不在静默时段"的时刻。
+   *
+   * 关键：**所有时间都必须从同一个锚点推出来**。
+   * 这里原来踩过一个很隐蔽的坑——日志用 Date.now() 造，而"现在"用
+   * 今天 12:00 造。下午六点之后跑，12:00 就比"现在-6小时"还早，
+   * 于是算出来的间隔是负的（-17 分钟），这个检查就挂了。
+   * 结果它**只在中午到傍晚之间能过**，晚上跑必失败。
+   */
   const noon = new Date()
   noon.setHours(12, 0, 0, 0)
-  const verdict = shouldLive(cfg, { lastUserMessageAt: noon.getTime() - 5 * HOUR }, noon.getTime())
-  // 只有当 cfg.life.enabled 为真时才应该通过
+  const anchor = noon.getTime()
+
+  reset({ journal: [{ at: anchor - 6 * HOUR, text: '半天前的事' }] })
+  const verdict = shouldLive(cfg, { lastUserMessageAt: anchor - 5 * HOUR }, anchor)
+
   if (!cfg.life.enabled) return '（配置里生活功能是关的，跳过）'
   assert(verdict.ok, `该触发却没触发：${verdict.reason}`)
   return '触发'
 })
 
 check('静默时段不触发（它也要睡觉）', () => {
-  reset({ journal: [{ at: Date.now() - 6 * HOUR, text: '旧事' }] })
+  // 同样：日志和"现在"必须同锚点，否则晚上跑会算出负间隔
   const night = new Date()
   night.setHours(3, 0, 0, 0)
+  const anchor = night.getTime()
+
+  reset({ journal: [{ at: anchor - 6 * HOUR, text: '旧事' }] })
   // 静默时段是 22:00-7:00，凌晨 3 点在里面
-  const verdict = shouldLive(cfg, { lastUserMessageAt: night.getTime() - 5 * HOUR }, night.getTime())
+  const verdict = shouldLive(cfg, { lastUserMessageAt: anchor - 5 * HOUR }, anchor)
   assert(!verdict.ok, '静默时段还触发')
   assert(/静默/.test(verdict.reason), `理由不对：${verdict.reason}`)
   return verdict.reason
+})
+
+check('判断用的时间基准不会和真实时钟打架（下午/晚上跑也要过）', () => {
+  /*
+   * 这条是给上面那两个坑加的护栏。
+   *
+   * 上面两条检查都依赖"编造的现在"和"编造的日志时间"相互一致。
+   * 只要有人图省事改成 Date.now() 造日志，就会重新变成
+   * "只在一天里的某几个小时能过"的假失败——这种 bug 最难查，
+   * 因为它今天绿明天红。
+   *
+   * 所以这里用一个**跟真实时钟差很远的锚点**（比如 30 天后）
+   * 再跑一次判断：如果实现里偷偷用了 Date.now()，这条就会挂。
+   */
+  const far = new Date(Date.now() + 30 * 86400000)
+  far.setHours(12, 0, 0, 0)
+  const anchor = far.getTime()
+
+  reset({ journal: [{ at: anchor - 6 * HOUR, text: '很远的将来那次' }] })
+  const verdict = shouldLive(cfg, { lastUserMessageAt: anchor - 5 * HOUR }, anchor)
+  if (!cfg.life.enabled) return '（配置里生活功能是关的，跳过）'
+  assert(verdict.ok, `换了时间基准就不触发了，说明实现依赖了真实时钟：${verdict.reason}`)
+  return '不受真实时钟影响'
 })
 
 /* ------------------------------------------------------------ 收尾 */
