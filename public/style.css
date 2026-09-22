@@ -722,6 +722,65 @@ button:disabled { opacity: 0.45; }
 .change-line.add { color: #34d399; }
 .change-line.del { color: var(--danger); opacity: 0.85; }
 
+/* ------------------------------------------------------------ 她的日子（时间线） */
+
+/*
+ * 一天一条，左边一条细竖线当时间轴。
+ * 不做成卡片堆叠：那是待办清单的语汇，而这里要看的是"一段时间的流动"。
+ */
+.day-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 52vh;
+  overflow-y: auto;
+  margin: 10px 0;
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+}
+
+.day-row {
+  position: relative;
+  padding: 0 0 14px 12px;
+}
+
+/* 时间轴上的小圆点，对到竖线上 */
+.day-row::before {
+  content: '';
+  position: absolute;
+  left: -19px;
+  top: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.55;
+}
+
+/* 最新那天（列表第一条）的圆点用主题色，一眼知道看到哪儿了 */
+.day-row:first-child::before {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.day-date {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.day-text {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.day-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  margin-top: 3px;
+}
+
 /* ------------------------------------------------------------ 表情包 */
 
 /*

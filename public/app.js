@@ -28,6 +28,10 @@ const S = {
   stickerTodayUsed: 0,
   stickerMaxPerDay: 8,
   stickerMinGap: 6,
+  // 她的日子（时间线）
+  lifeDays: [],
+  lifeDaysStats: {},
+  lifeDaysPending: 0,
   readiness: [],
   lastSeq: 0,
   streaming: false,
@@ -1362,6 +1366,73 @@ function buildSettings(tab) {
     )
   }
 
+  if (tab === 'days') {
+    /*
+     * 她的日子（时间线）。
+     *
+     * 为什么值得单独一页：她的流水本来是完整的，但只有最近 8 条会被
+     * 喂回去、也没有界面能看——所以她"只有现在、没有过去"。
+     * 按天压成一天一句之后，你才能看到"她这些天都干了什么"。
+     */
+    const days = S.lifeDays ?? []
+    const stats = S.lifeDaysStats ?? {}
+
+    const head = document.createElement('div')
+    head.className = 'field'
+    head.append(
+      label(`她的日子（${stats.total ?? 0} 天）`),
+      hint(
+        stats.total
+          ? `${stats.first ?? ''} 起到 ${stats.last ?? ''}，一天一条。` +
+            (stats.byFallback ? `${stats.byFallback} 天是自动兜底写的（当时模型没调通）。` : '')
+          : '还没有记录。她过完一天之后会自动记一句，也可以点下面的「补上」立刻整理。',
+      ),
+    )
+
+    const list = document.createElement('div')
+    list.className = 'day-list'
+
+    if (days.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'hint'
+      empty.textContent = '她每天都在过日子，只是还没被整理成"一天一句"。等一天过完就会自动记下来。'
+      list.append(empty)
+    }
+
+    for (const d of days) {
+      const row = document.createElement('div')
+      row.className = 'day-row'
+
+      const date = document.createElement('div')
+      date.className = 'day-date'
+      date.textContent = fmtDay(d.date)
+
+      const text = document.createElement('div')
+      text.className = 'day-text'
+      text.textContent = d.text
+
+      const meta = document.createElement('div')
+      meta.className = 'day-meta'
+      // 那天记了几件事、是不是兜底写的——都摊开说，不含糊
+      meta.textContent = `${d.count ?? '?'} 件事` + (d.by === 'fallback' ? ' · 自动兜底' : '')
+
+      row.append(date, text, meta)
+      list.append(row)
+    }
+
+    body.replaceChildren(
+      head,
+      list,
+      actionBlock(
+        '补上还没整理的',
+        '把过完但还没写成一句的日子补上',
+        'btn-days-catchup',
+        '换一批看看',
+        'btn-days-reload',
+      ),
+    )
+  }
+
   if (tab === 'sticker') {
     /*
      * 表情包管理。
@@ -1734,6 +1805,24 @@ function openSheet(tab) {
       if (S.activeTab === 'sticker') buildSettings('sticker')
     })
   }
+
+  if (S.activeTab === 'days') {
+    void loadLifeDays().then(() => {
+      if (S.activeTab === 'days') buildSettings('days')
+    })
+  }
+}
+
+/** 拉她的日子（时间线） */
+async function loadLifeDays() {
+  try {
+    const data = await api('/api/life/days?limit=60')
+    S.lifeDays = data.days ?? []
+    S.lifeDaysStats = data.stats ?? {}
+    S.lifeDaysPending = data.pending ?? 0
+  } catch (err) {
+    toast(`读她的日子失败：${err.message}`)
+  }
 }
 
 /** 拉表情包列表 */
@@ -1772,6 +1861,20 @@ function fmtTime(at) {
   const d = new Date(at)
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/**
+ * "2026-09-21" → "9月21日 周一"
+ *
+ * 加星期是有用的：你会想"她那天是周末还是工作日"——
+ * 那直接影响她那天干什么。
+ */
+function fmtDay(dateKey) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateKey ?? ''))
+  if (!m) return String(dateKey ?? '')
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  const wd = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()]
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${wd}`
 }
 
 function closeSheet() {
@@ -1977,6 +2080,22 @@ function wireEvents() {
           `新增 ${r.added ?? 0} 张，生成描述 ${r.described ?? 0} 张，清理 ${r.removed ?? 0} 张` +
             ((r.errors ?? []).length ? `；${r.errors.length} 个问题` : ''),
         )
+        return
+      }
+      if (id === 'btn-days-catchup') {
+        const r = await api('/api/life/days/catchup', { method: 'POST' })
+        await loadLifeDays()
+        buildSettings('days')
+        showActionResult(
+          true,
+          r.added > 0 ? `补了 ${r.added} 天` : '没有要补的（都整理过了）',
+        )
+        return
+      }
+      if (id === 'btn-days-reload') {
+        await loadLifeDays()
+        buildSettings('days')
+        showActionResult(true, `读回 ${S.lifeDays.length} 天`)
         return
       }
       if (id === 'btn-test-model') {

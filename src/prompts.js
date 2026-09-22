@@ -131,7 +131,7 @@ export function renderTranscript(messages, { maxChars = 12000, now: refTs } = {}
 }
 
 /** 聊天用的 system prompt */
-export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection, selfSection, stickerSection, nowText, busySection, sleepySection }) {
+export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection, lifeDaysSection, selfSection, stickerSection, nowText, busySection, sleepySection }) {
   const sections = []
 
   /*
@@ -217,6 +217,17 @@ ${memory.trim() || '（暂时还没有关于对方的长期记忆）'}`)
    */
   if (lifeSection) {
     sections.push(lifeSection)
+  }
+
+  /*
+   * 她"这些天的日子"（按天压过的过去）。
+   *
+   * 跟上面那段是两个粒度：流水是"昨天下午三点煮了面"，
+   * 这一段是"那天大概什么样"。放在流水之后，
+   * 因为先看细节、再看概览更符合人回忆的顺序。
+   */
+  if (lifeDaysSection) {
+    sections.push(lifeDaysSection)
   }
 
   if (summary) {
@@ -453,6 +464,46 @@ ${activity}
   ]
 }
 
+/**
+ * 把一天的生活流水压成一句"她记得的日子"。
+ *
+ * 要的是**她自己回想**的语气，不是日志也不是日记：
+ *   好："下午两点才起，把剩面热了吃，晚上改页面改到眼睛疼"
+ *   差："上午休息，下午用餐，晚间工作"——那是报告
+ *
+ * 卡在 40 字以内是刻意的：它一天一条会长期累积，
+ * 而且每天都要喂回给她（7 天份）。太长就是持续烧 token。
+ */
+export function buildDaySummaryPrompt({ dateKey, activities }) {
+  const system = `你在替一个虚构角色写"这一天的记忆"。
+
+这个角色活在一个聊天应用里。你要把她这一天零碎的经历，
+压成**一句她自己回想起来的话**。
+
+【要求】
+- **一句话，40 字以内**。越短越好。
+- 用她自己的口气，像事后回想，不像写日记，更不像工作汇报。
+  好："下午两点才起，把剩面热了吃，晚上改页面改到眼睛疼"
+  好："下楼拿了快递，风大，回来煮了碗面"
+  差："上午休息，下午用餐，晚间工作"——那是报告
+  差："今天过得还行"——太虚，没有具体的事
+- **挑有代表性的，不要罗列全部**。两三次具体、有画面的就够。
+- 保留具体细节（吃什么、猫干了什么、改到第几版）——
+  那是"真过过日子"的证据。
+- 不提"对方"（那个网友）。这是她自己的日子。
+- 不要引号、不要编号、不要用"今天"开头（日期在外面已经有了）。
+
+只输出这一句话，不要任何解释。`
+
+  return [
+    { role: 'system', content: system },
+    {
+      role: 'user',
+      content: `【${dateKey} 这一天她经历的事】\n${activities.map((t) => '- ' + t).join('\n')}\n\n写成一句话。`,
+    },
+  ]
+}
+
 /** 后台抽取长期记忆 */
 export function buildMemoryPrompt({ existingMemory, transcript }) {
   const system = `你负责维护一份"关于某个人的长期记忆档案"。
@@ -526,6 +577,7 @@ export function buildProactiveMessagePrompt({
   todayCount,
   mood,
   lifeSection,
+  lifeDaysSection,
   selfSection,
   stickerSection,
   nowText,
@@ -545,7 +597,7 @@ ${persona.trim()}
 
 【关于对方，你记得的事】
 ${memory.trim() || '（暂时还没有）'}
-${selfSection ? `\n${selfSection}\n` : ''}${lifeSection ? `\n${lifeSection}\n` : ''}${stickerSection ? `\n${stickerSection}\n` : ''}
+${selfSection ? `\n${selfSection}\n` : ''}${lifeSection ? `\n${lifeSection}\n` : ''}${lifeDaysSection ? `\n${lifeDaysSection}\n` : ''}${stickerSection ? `\n${stickerSection}\n` : ''}
 
 【你现在要做什么】
 你刚刚自己拿起手机，想给对方发条消息。**这不是在回复他**——

@@ -39,6 +39,8 @@ export const PATHS = {
   life: path.join(DATA_DIR, 'life.md'),
   journal: path.join(DATA_DIR, 'life.jsonl'),
   lifeArcs: path.join(DATA_DIR, 'life-arcs.json'),
+  // 按天压过的"她的过去"（一天一句）
+  lifeDays: path.join(DATA_DIR, 'life-days.jsonl'),
   // 它会变的自我（怎么看待自己），跟 persona.md（是谁，锁死）分开
   self: path.join(DATA_DIR, 'self.md'),
   selfSnapshots: path.join(DATA_DIR, 'self-snapshots'),

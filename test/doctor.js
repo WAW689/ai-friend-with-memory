@@ -71,7 +71,7 @@ console.log('\n体检：逐段核对\n')
 check('八段都在清单里，且标了该出现在哪份提示词', () => {
   const r = runDoctor(cfg)
   const ids = r.sections.map((s) => s.id)
-  for (const expect of ['persona', 'memory', 'self', 'life', 'time', 'weather', 'sticker', 'recall']) {
+  for (const expect of ['persona', 'memory', 'self', 'life', 'days', 'time', 'weather', 'sticker', 'recall']) {
     assert(ids.includes(expect), `缺段落 ${expect}`)
   }
   for (const s of r.sections) {
@@ -119,17 +119,23 @@ check('自己拼一份完整提示词，八段都该能核对通过', () => {
   /*
    * 这是这个套件最有价值的一条：**端到端核对拼装**。
    * 前两次事故（life.md 没进提示词、没传给主动消息）都会在这里暴露。
+   *
+   * 注意：这里拼的提示词必须把**所有** scope='chat' 的段落都喂进去，
+   * 少给一段，只要那段恰好有内容，这条就会报"没拼进提示词"——
+   * 那是在报测试自己的漏，不是在报代码的错。
    */
   const r = runDoctor(cfg)
+  const seg = (id) => r.sections.find((s) => s.id === id).text
   const chatPrompt = buildChatSystemPrompt({
-    persona: r.sections.find((s) => s.id === 'persona').text,
-    memory: r.sections.find((s) => s.id === 'memory').text,
+    persona: seg('persona'),
+    memory: seg('memory'),
     summary: '',
     lastExchangeAt: 0,
-    selfSection: r.sections.find((s) => s.id === 'self').text,
-    lifeSection: r.sections.find((s) => s.id === 'life').text,
-    stickerSection: r.sections.find((s) => s.id === 'sticker').text,
-    nowText: r.sections.find((s) => s.id === 'time').text,
+    selfSection: seg('self'),
+    lifeSection: seg('life'),
+    lifeDaysSection: seg('days'),
+    stickerSection: seg('sticker'),
+    nowText: seg('time'),
   })
   const pro = (() => {
     const m = buildProactiveMessagePrompt({
@@ -140,8 +146,9 @@ check('自己拼一份完整提示词，八段都该能核对通过', () => {
       lastAssistantAgo: '1 小时前',
       unansweredStreak: 0,
       todayCount: 0,
-      weatherSection: r.sections.find((s) => s.id === 'weather').text,
-      recallSection: r.sections.find((s) => s.id === 'recall').text,
+      weatherSection: seg('weather'),
+      recallSection: seg('recall'),
+      lifeDaysSection: seg('days'),
     })
     return Array.isArray(m) ? m.map((x) => x.content).join('\n') : String(m)
   })()

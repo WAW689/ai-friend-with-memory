@@ -12,6 +12,7 @@ import { push, recordPush } from './bark.js'
 import { runBackup } from './backup.js'
 import { readRecentImages, saveImage } from './images.js'
 import { buildLifeSection, journalSince, readJournal, shouldLive, liveOneRound } from './life.js'
+import { buildLifeDaysSection } from './life-days.js'
 import { buildSelfSection, evolveSelf, renderExperiences } from './self.js'
 import { markStickerUsed, stickerMenu } from './stickers.js'
 import { describeNow } from './almanac.js'
@@ -411,6 +412,14 @@ function buildContext(cfg) {
     selfSection: buildSelfSection(),
     // 它自己的生活（不在聊天时也过日子），没有流水时是空串
     lifeSection: buildLifeSection(),
+    /*
+     * 她"这些天的日子"（按天压过的过去）。
+     *
+     * 跟 lifeSection 是两个粒度：那个是"昨天下午三点煮了面"（细节），
+     * 这个是"那天大概什么样"（概览）。有了它她才**记得起来**上周的事，
+     * 而不是只有最近 8 条流水。
+     */
+    lifeDaysSection: buildLifeDaysSection(),
     // 表情包清单 + 用法（没有表情包时是空串）
     stickerSection,
     stickerList: menu.list,
@@ -1025,6 +1034,7 @@ async function generateProactiveMessages(cfg, ctx, mood) {
      */
     selfSection: ctx.selfSection,
     lifeSection: ctx.lifeSection,
+    lifeDaysSection: ctx.lifeDaysSection,
     stickerSection: ctx.stickerSection,
     nowText: ctx.nowText,
     weatherSection: ctx.weatherSection,

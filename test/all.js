@@ -86,6 +86,7 @@ const OFFLINE = [
   ['消息清洗', 'message-clean.js'],
   ['提示词与时间感知', 'prompts.js'],
   ['生活流水', 'life.js'],
+  ['她的过去（按天）', 'life-days.js'],
   ['会变的自我', 'self.js'],
   ['表情包', 'stickers.js'],
   ['黄历与天气', 'almanac.js'],

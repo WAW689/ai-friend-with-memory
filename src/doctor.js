@@ -27,6 +27,7 @@ import { describeWeather, peekSunTimes, peekWeather } from './weather.js'
 import { peekPending } from './recall.js'
 import { buildBusySection, busyState } from './busy.js'
 import { buildSleepySection, sleepiness } from './sleepy.js'
+import { buildLifeDaysSection, daysStats } from './life-days.js'
 
 /** 粗略的 token 估算：中文一个字约 1 token，英文 4 字符约 1 token */
 export function estimateTokens(text) {
@@ -76,6 +77,8 @@ export function runDoctor(cfg = loadConfig(), opts = {}) {
   const busySection = buildBusySection(busy)
   const sleepy = sleepiness()
   const sleepySection = buildSleepySection(sleepy)
+  const lifeDaysSection = buildLifeDaysSection()
+  const dayStats = daysStats()
 
   /**
    * 每一段：叫什么、来自哪个文件、内容、是不是"启用了但没内容"。
@@ -130,6 +133,15 @@ export function runDoctor(cfg = loadConfig(), opts = {}) {
       scope: 'chat',
       required: false,
       emptyHint: `还没有生活设定或流水（流水 ${journal.length} 条）。写 data/life.md，或者跑 node src/backfill-life.js 补几天历史。`,
+    },
+    {
+      id: 'days',
+      name: '她的过去（按天）',
+      source: 'data/life-days.jsonl',
+      text: lifeDaysSection,
+      scope: 'chat',
+      required: false,
+      emptyHint: `还没收过任何一天（流水 ${journal.length} 条）。她会在每天过完后自己收；想立刻补就跑 node src/cli.js days catchup。`,
     },
     {
       id: 'time',
@@ -240,6 +252,7 @@ export function runDoctor(cfg = loadConfig(), opts = {}) {
     notInjected,
     totalTokens,
     journalCount: journal.length,
+    dayCount: dayStats.total,
     stickerCount: lib.items.length,
     stickerWithDesc: lib.items.filter((i) => String(i.desc ?? '').trim()).length,
     pendingCount: pending?.items?.length ?? 0,

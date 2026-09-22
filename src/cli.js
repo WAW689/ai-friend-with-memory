@@ -18,6 +18,7 @@ import { testPush, push } from './bark.js'
 import { BACKUP_ROOT, listBackups, runBackup } from './backup.js'
 import { imageStats } from './images.js'
 import { hasLife, lastActivityAt, liveOneRound, readArcs, readJournal, readLife, shouldLive } from './life.js'
+import { catchUpDaySummaries, daysStats, daysTimeline } from './life-days.js'
 import { characterName, respond, runProactiveCheck, proactiveGate, extractMemory, readMemory, readProactiveEvents } from './engine.js'
 import { verifyKey } from './llm.js'
 import { store } from './storage.js'
@@ -510,7 +511,7 @@ const commands = {
     console.log(`  对话记录        ${ctx.recent.length} 条，约 ${estimateTokens(ctx.transcript)} token`)
     console.log(`  她主动开口时    另外一份提示词（带天气，不带对话记录）`)
     console.log('')
-    console.log(`  生活流水 ${report.journalCount} 条 · 表情包 ${report.stickerWithDesc}/${report.stickerCount} 张有描述 · 待回访 ${report.pendingCount} 件`)
+    console.log(`  生活流水 ${report.journalCount} 条 · 她的日子 ${report.dayCount} 天 · 表情包 ${report.stickerWithDesc}/${report.stickerCount} 张有描述 · 待回访 ${report.pendingCount} 件`)
     console.log('')
 
     if (showAll) {
@@ -807,6 +808,59 @@ const commands = {
     console.log(`连续未回计数：${before} → 0`)
   },
 
+  /**
+   * 她的日子（按天压成的一句话）。
+   *
+   *   node src/cli.js days           看时间线
+   *   node src/cli.js days catchup   立刻把缺的日子补上
+   *
+   * 补收要调模型，所以是串行、限量的：一次最多 10 天，
+   * 免得一下午的 token 全花在补历史上。
+   */
+  async days() {
+    if (args[0] === 'catchup') {
+      if (!hasLife()) {
+        console.log('')
+        console.log(`  还没有生活设定（${PATHS.life}）。它没有"自己的日子"可收。`)
+        console.log('')
+        return
+      }
+      const before = daysStats().total
+      console.log('')
+      console.log('  正在补收……（要调模型，一天一次）')
+      const r = await catchUpDaySummaries(cfg, { max: 10 })
+      const after = daysStats()
+      console.log('')
+      console.log(`  新增 ${r.added} 天，共 ${after.total} 天${r.pending > r.added ? `（还剩 ${r.pending - r.added} 天，再跑一次继续）` : ''}`)
+      if (before === after.total && r.added === 0 && r.pending === 0) {
+        console.log('  没有缺的日子——流水里有多少天，就收了多少天。')
+      }
+      console.log('')
+      return
+    }
+
+    const stats = daysStats()
+    const list = daysTimeline({ limit: 60 })
+
+    console.log('')
+    if (list.length === 0) {
+      console.log('  还没有收过任何一天。')
+      console.log('  它会在每天过完后自己收；想立刻补就跑 node src/cli.js days catchup')
+      console.log('')
+      return
+    }
+
+    console.log(`  她的日子（${stats.total} 天，${stats.first} ~ ${stats.last}；模型写的 ${stats.byModel} 天，兜底的 ${stats.byFallback} 天）`)
+    console.log('')
+    for (const d of list) {
+      const mark = d.by === 'fallback' ? '·' : ' '
+      console.log(`  ${mark} ${d.date}  ${d.text}`)
+    }
+    console.log('')
+    console.log('  （· 表示那天摘要没用上模型，是流水拼的）')
+    console.log('')
+  },
+
   async status() {
     needStore()
     const lastUser = store.lastUserMessage()
@@ -843,6 +897,8 @@ async function main() {
   wake [--force]     立刻跑一次主动判断（--force 跳过所有拦截）
   memory             打印当前的记忆档案
   extract-memory     立刻抽取一次记忆
+  days               看她的日子（按天的摘要）
+  days catchup       把还缺的日子补上
 
 配置也可以全部用环境变量：DEEPSEEK_API_KEY / BARK_KEY / FRIEND_PORT / FRIEND_ACCESS_TOKEN
 `)

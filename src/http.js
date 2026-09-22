@@ -61,7 +61,14 @@ import {
 } from './stickers.js'
 import { store, toWireMessage } from './storage.js'
 import { stateForUI } from './status.js'
-import { appendJsonl, contentHash, ensureDir, log, now, truncate } from './util.js'
+import {
+  catchUpDaySummaries,
+  daysStats,
+  daysTimeline,
+  summarizedDates,
+} from './life-days.js'
+import { readJournal } from './life.js'
+import { appendJsonl, contentHash, ensureDir, localDateKey, log, now, truncate } from './util.js'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -91,6 +98,18 @@ function broadcast(event, data) {
     } catch {
       sseClients.delete(res)
     }
+  }
+}
+
+/** 有流水但已过完、还没摘要的天数 */
+function countPendingDays() {
+  try {
+    const today = localDateKey()
+    const done = summarizedDates()
+    const withFlow = new Set(readJournal().map((e) => localDateKey(e.at)))
+    return [...withFlow].filter((d) => d < today && !done.has(d)).length
+  } catch {
+    return 0
   }
 }
 
@@ -626,6 +645,30 @@ async function handleApi(req, res, url, cfg) {
       lib.items = lib.items.filter((it) => it.id !== id)
       writeStickerLib(lib)
       return sendJson(res, 200, { ok: true })
+    }
+
+    /* ---------------- 她的日子（时间线） ---------------- */
+    /*
+     * 她的过去。
+     *
+     * 流水（life.jsonl）本身是完整的，但只有最近 8 条会被喂回去、
+     * 也没有界面能看——所以她"只有现在、没有过去"。
+     * 按天压成一天一句之后，既能被她引用，也能在这里回看。
+     */
+    case 'GET /api/life/days': {
+      const limit = Math.min(400, Number(url.searchParams.get('limit')) || 60)
+      return sendJson(res, 200, {
+        days: daysTimeline({ limit }),
+        stats: daysStats(),
+        // 有流水但已过完、还没摘要的天数——界面上提示"还在补"
+        pending: countPendingDays(),
+      })
+    }
+
+    /** 手动补一次（界面上的"补上"按钮） */
+    case 'POST /api/life/days/catchup': {
+      const result = await catchUpDaySummaries(cfg, { max: 10 })
+      return sendJson(res, 200, { ok: true, ...result })
     }
 
     /* ---------------- 她的自我（会变的那一层） ---------------- */

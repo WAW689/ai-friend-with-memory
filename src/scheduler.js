@@ -11,6 +11,7 @@
 import { loadConfig } from './config.js'
 import { maybeAnnounceBusy, runProactiveCheck, scheduleNextProactive } from './engine.js'
 import { lastActivityAt, liveOneRound, shouldLive } from './life.js'
+import { catchUpDaySummaries } from './life-days.js'
 import { store } from './storage.js'
 import { log, now, randInt } from './util.js'
 
@@ -20,6 +21,8 @@ let timer = null
 let running = false
 /** 生活流水是否正在生成（避免叠加多次调用） */
 let livingNow = false
+/** 上次检查"有没有该补的日子摘要"是什么时候 */
+let lastDaySummaryAt = 0
 
 export function startScheduler() {
   if (timer) return
@@ -114,6 +117,29 @@ async function maybeLive(cfg) {
   }
 }
 
+/**
+ * 给已经过完但还没摘要的日子补上"一天一句"。
+ *
+ * 为什么要在这里做：摘要必须等一天**过完**才能写（当天写会随时间的推移
+ * 变样，白花钱）。而"一天过完"这件事没有事件可挂，只能靠轮询。
+ *
+ * 节流 30 分钟：这件事一天最多产出一条，没必要每分钟都查文件。
+ */
+async function maybeSummarizeDays(cfg) {
+  const at = now()
+  if (at - lastDaySummaryAt < 30 * 60 * 1000) return { skipped: '刚查过' }
+  lastDaySummaryAt = at
+
+  try {
+    const r = await catchUpDaySummaries(cfg, { at })
+    if (r.added > 0) log.info(`补了 ${r.added} 天的日子摘要`)
+    return r
+  } catch (err) {
+    log.warn(`补日子摘要失败：${err.message}`)
+    return { error: err.message }
+  }
+}
+
 /** 跑一次检查。running 防重入，避免慢请求把检查堆起来。 */
 export async function tick() {
   if (running) return { skipped: '上一次检查还没结束' }
@@ -130,6 +156,14 @@ export async function tick() {
     const liveResult = await maybeLive(cfg)
 
     /*
+     * 顺手把已经过完的日子补上摘要。
+     *
+     * 放在过日子之后：刚生成的流水可能让"昨天"变得完整，
+     * 先补摘要就能把它一起算进去。
+     */
+    const dayResult = await maybeSummarizeDays(cfg)
+
+    /*
      * 她刚报备了"我去忙了"，这一轮就不再主动开口。
      *
      * 两条消息连着发很吵；而且"我去忙了"本身已经是一次开口了。
@@ -137,7 +171,7 @@ export async function tick() {
      */
     if (liveResult?.announced) {
       scheduleNextProactive(cfg)
-      return { skipped: '刚报备去忙了', live: liveResult }
+      return { skipped: '刚报备去忙了', live: liveResult, days: dayResult }
     }
 
     if (!cfg.proactive.enabled) return { skipped: '主动消息已关闭', live: liveResult }

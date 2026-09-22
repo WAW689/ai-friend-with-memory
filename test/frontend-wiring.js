@@ -154,6 +154,20 @@ const statusChecks = [
   ['状态栏会截断而不是撑破顶栏', /\.status[\s\S]{0,240}text-overflow: ellipsis/.test(css)],
 ]
 
+// 她的日子（时间线）
+const daysChecks = [
+  ['HTML 有「她的日子」标签', /data-tab="days"/.test(html)],
+  ['JS 有 days 分支的渲染', /tab === 'days'/.test(js)],
+  ['JS 单独拉 /api/life/days', /api\('\/api\/life\/days/.test(js)],
+  ['JS 能手动补摘要', /api\/life\/days\/catchup/.test(js)],
+  ['日期带星期（看得出那天是不是周末）', /function fmtDay/.test(js) && /周日/.test(js)],
+  ['兜底写的会标出来', /by === 'fallback'/.test(js)],
+  ['CSS 有 .day-list', /\.day-list\s*\{/.test(css)],
+  ['CSS 有 .day-row', /\.day-row\s*\{/.test(css)],
+  ['CSS 时间轴有小圆点', /\.day-row::before/.test(css)],
+  ['CSS 有 .day-date / .day-text', /\.day-date\s*\{/.test(css) && /\.day-text\s*\{/.test(css)],
+]
+
 let failed = 0
 for (const [name, ok] of checks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
@@ -198,6 +212,12 @@ for (const [name, ok] of stickerChecks) {
 
 console.log('\n顶栏状态')
 for (const [name, ok] of statusChecks) {
+  console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
+  if (!ok) failed++
+}
+
+console.log('\n她的日子')
+for (const [name, ok] of daysChecks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
   if (!ok) failed++
 }
