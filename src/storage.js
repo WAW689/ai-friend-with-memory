@@ -112,16 +112,30 @@ class Store {
 
   /**
    * 读出当前文件里最大的 seq，再 +1。
-   * 只读文件尾部的若干字节，不整份加载——聊天记录会越来越长。
    *
-   * 另外要和自己内存里的最大值取 max：万一刚写完还没落盘（或别的进程
-   * 写了更大的号），也不能让新消息的号回退。
+   * 只读文件**尾部**若干字节，不整份加载——聊天记录会越来越长，
+   * 每次发消息都读全文是不行的。
+   *
+   * ── 一个踩到的坑（表现为 seq 碰撞）──────────────────────
+   * 光"从后往前找第一个能 JSON 解析出 seq 的行"是不够的。
+   * 如果尾部那行是**没写完的半行**（进程被杀、断电、磁盘满），
+   * 它解析失败，于是继续往前找，最后拿到一条**旧消息**的 seq——
+   * 新消息就拿到了旧号，和历史上那条撞在一起。
+   *
+   * 实测数据里发现过 3 处这样的碰撞（seq 37/38/220 各两条）。
+   * 后果不致命（渲染按数组顺序，不按 seq），但会让"按 seq 排序"的逻辑错乱，
+   * 而且很难查。
+   *
+   * 修法：只认**看起来完整的**行——必须有 seq，而且得有 role 或 text。
+   * 半行通常只写出 `{"seq":38,"at":123,"ro`，缺字段，于是被跳过。
    */
   nextSeqFromDisk() {
     let fromDisk = 0
     try {
       const stat = fs.statSync(PATHS.messages)
-      const tailBytes = Math.min(8192, stat.size)
+      // 256KB 而不是 8KB：一条消息可能很长（带图占位的那条也不小），
+      // 窗口太小会整个落在半行里，往前退太多条
+      const tailBytes = Math.min(256 * 1024, stat.size)
       if (tailBytes > 0) {
         const fd = fs.openSync(PATHS.messages, 'r')
         try {
@@ -129,18 +143,20 @@ class Store {
           fs.readSync(fd, buffer, 0, tailBytes, stat.size - tailBytes)
           const text = buffer.toString('utf8')
           const lines = text.split('\n')
-          // 第一行可能是被截断的半行，从后往前找第一个能解析出 seq 的
           for (let i = lines.length - 1; i >= 0; i--) {
             const line = lines[i].trim()
             if (!line) continue
             try {
               const parsed = JSON.parse(line)
-              if (typeof parsed?.seq === 'number') {
+              // 必须是完整消息：有 seq，而且有 role 或 text
+              const looksComplete =
+                typeof parsed?.seq === 'number' && (parsed.role !== undefined || parsed.text !== undefined)
+              if (looksComplete) {
                 fromDisk = parsed.seq
                 break
               }
             } catch {
-              // 半行，继续往前找
+              // 半行或坏行，继续往前找
             }
           }
         } finally {

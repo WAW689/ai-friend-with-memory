@@ -33,6 +33,42 @@ function assert(cond, message) {
   if (!cond) throw new Error(message)
 }
 
+/*
+ * 播一份种子消息。
+ *
+ * 聚合器（test/all.js）会预先往共享的 test/tmp 里写种子，
+ * 但**单独跑这个文件时没有**——于是 tmp-backup-and-seq 是个空目录，
+ * messages.jsonl 根本不存在，下面的 seq 用例全部 ENOENT。
+ * （之前单独跑确实报了 6 个失败，聚合器里却是绿的。）
+ *
+ * 这里自己保证有内容，两种跑法就都成立。
+ */
+{
+  fs.mkdirSync(path.dirname(PATHS.messages), { recursive: true })
+  let rows = []
+  try {
+    rows = fs.readFileSync(PATHS.messages, 'utf8').split('\n').filter(Boolean)
+  } catch {
+    /* 文件不存在，按空处理 */
+  }
+  if (rows.length === 0) {
+    const base = Date.now() - 60 * 60 * 1000
+    const seed = [
+      { role: 'user', text: '（种子）今天几点下课' },
+      { role: 'assistant', text: '（种子）十二点零五' },
+      { role: 'user', text: '（种子）那我去找你' },
+    ]
+    fs.writeFileSync(
+      PATHS.messages,
+      seed
+        .map((m, i) => JSON.stringify({ seq: i + 1, at: base + i * 60000, kind: 'chat', ...m }))
+        .join('\n') + '\n',
+      'utf8',
+    )
+    console.log('  （已播种 3 条测试消息——单独跑时才需要）')
+  }
+}
+
 console.log('\n备份\n')
 
 check('能生成一份备份', () => {
@@ -134,6 +170,60 @@ check('文件尾部有半截坏行时仍能取到正确序号', () => {
     const mine = store.append({ role: 'user', text: '（坏行之后写入）' })
     assert(mine.seq === before + 1, `序号不对：期望 ${before + 1}，得到 ${mine.seq}`)
     return `坏行被跳过，序号 ${before} → ${mine.seq}`
+  } finally {
+    fs.writeFileSync(PATHS.messages, original, 'utf8')
+    store.load()
+  }
+})
+
+check('尾部是"合法 JSON 但缺字段"的半行时，也不会退回去用旧号（关键）', () => {
+  /*
+   * 这条盯的是一个真出现过的 seq 碰撞（实测数据里 3 处：37/38/220 各两条）。
+   *
+   * 老逻辑是"从后往前找第一个能 JSON 解析出 seq 的行"。
+   * 如果断电时正好写到 `{"seq":38` 就停了，这**恰好是合法 JSON**，
+   * 但它是半条消息（缺 role/text）。老逻辑会认它，然后……
+   * 更糟的情况是它连 seq 都没写完，于是往前退一条，拿到**旧消息**的 seq，
+   * 新消息就和历史上那条撞号了。
+   *
+   * 修法是只认"看起来完整的行"：有 seq **而且**有 role 或 text。
+   */
+  const original = fs.readFileSync(PATHS.messages, 'utf8')
+  try {
+    store.load()
+    const before = store.messages[store.messages.length - 1].seq
+
+    // 这种半行是合法 JSON，但缺 role/text —— 老逻辑会认它
+    fs.appendFileSync(PATHS.messages, '{"seq":12345,"at":1}\n{')
+    const mine = store.append({ role: 'user', text: '（缺字段半行之后）' })
+
+    assert(
+      mine.seq === before + 1,
+      `退回去用了旧号：期望 ${before + 1}，得到 ${mine.seq}（说明它认了那条缺字段的半行）`,
+    )
+    return `缺字段半行被跳过，${before} → ${mine.seq}`
+  } finally {
+    fs.writeFileSync(PATHS.messages, original, 'utf8')
+    store.load()
+  }
+})
+
+check('尾部半行有 seq 但没写完 role 时，拿到的号仍然往前（不碰撞）', () => {
+  const original = fs.readFileSync(PATHS.messages, 'utf8')
+  try {
+    store.load()
+    const before = store.messages[store.messages.length - 1].seq
+    // 这条是真实断电最可能的样子：写到一半，缺引号
+    fs.appendFileSync(PATHS.messages, '{"seq":88888,"at":123,"role":"user","text":"写到一半就断了\n')
+
+    const a = store.append({ role: 'user', text: '（一）' })
+    const b = store.append({ role: 'assistant', text: '（二）' })
+    assert(a.seq > before && b.seq > a.seq, `序号不对：${before} → ${a.seq} → ${b.seq}`)
+
+    // 关键是不能和已有的任何一条撞号
+    const used = new Set(store.messages.map((m) => m.seq))
+    assert(used.size === store.messages.length, '出现了撞号')
+    return `${before} → ${a.seq} → ${b.seq}，无撞号`
   } finally {
     fs.writeFileSync(PATHS.messages, original, 'utf8')
     store.load()

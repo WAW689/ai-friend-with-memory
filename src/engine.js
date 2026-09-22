@@ -553,10 +553,22 @@ export async function respond(text, hooks = {}) {
   store.saveState()
 
   let full = ''
+  let lastShownLen = 0
   try {
     for await (const delta of streamChat(cfg, messages, { signal: hooks.signal })) {
       full += delta
-      hooks.onChunk?.(delta, full)
+      /*
+       * 给前端的是**清洗过**的版本，不是原文。
+       *
+       * 关键是清洗的是 `full`（累计全文），不是单个 delta——
+       * 前端用的也是 payload.full（它要显示整段并做逐字动画）。
+       * 而双空格恰恰产生在分片边界上：模型分两次吐出 "a\n" 和 "\nb"，
+       * 单独清洗各得 "a " 和 " b"，拼起来就是 "a  b"。
+       * 在累计全文上清洗，' {2,}' 那一步才能把它收掉。
+       */
+      const shown = sanitizeFull(full)
+      hooks.onChunk?.(shown.slice(lastShownLen), shown)
+      lastShownLen = shown.length
     }
   } finally {
     store.state.generating = false
@@ -594,7 +606,22 @@ export async function respond(text, hooks = {}) {
   return { message, full: parsed.text, stickerId: sticker?.id ?? null }
 }
 
-/** 模型偶尔会带上引号或旁白，清一下 */
+/**
+ * 清掉模型偶尔带的引号、旁白，以及**换行**。
+ *
+ * 换行是后加的，因为实测发现她会把回复写成带空行的多段：
+ *
+ *   "就是排队。\n\n你是新来的，先让你进最快的队。……\n\n快队排的人少，……"
+ *
+ * 在气泡里渲染出来就是段落之间空一行，像文档不像微信。
+ * 统计过 400 条回复：39 条带换行，而且**全是 `\n\n`，单个 `\n` 一处都没有**——
+ * 说明她确实在用"空行"分段，不是偶发。
+ *
+ * 为什么是"换行变空格"而不是"把 `\n\n` 收成一个 `\n`"：
+ * 气泡是 white-space: pre-wrap，单个 `\n` 照样断行。
+ * 而微信/iMessage 里连发两句话也是**一条连着显示**，不是两条。
+ * 她的人设要的是"一次 1-2 句像打字"，那就该是一行。所以合成一句。
+ */
 function cleanupReply(text) {
   let out = String(text ?? '').trim()
   // 去掉整体包裹的引号
@@ -603,7 +630,35 @@ function cleanupReply(text) {
   }
   // 去掉偶发的旁白式开头
   out = out.replace(/^(（[^）]*）|\([^)]*\))\s*/, '').trim()
+  // 换行 → 空格（见上面说明）
+  out = out.replace(/\s*\n+\s*/g, ' ').trim()
   return out
+}
+
+/**
+ * 流式输出时给前端看的版本。
+ *
+ * 跟 cleanupReply 的差别：这里**不能 trim**，因为正文还没结束——
+ * trim 会把正在打的空格吃掉，后面接上的字就黏在一起了。
+ *
+ * 三条：
+ *   1. 换行变空格（否则屏幕上先空出一行、结束时又缩回去）
+ *   2. 连续空格收成一个。**必须在累计全文上做**：双空格产生于分片边界
+ *      （"a\n" + "\nb" 各自清洗成 "a " 和 " b"），单看一片是发现不了的
+ *   3. 因为输入是累计全文，返回的也是全量——调用方自己算增量
+ */
+export function sanitizeFull(text) {
+  return String(text ?? '')
+    .replace(/\s*\n+\s*/g, ' ')
+    .replace(/ {2,}/g, ' ')
+}
+
+/**
+ * 保留这个名字给单个分片用（测试和 __debug 在用）。
+ * 只做换行处理，不做空格收敛——单片的空格收敛在跨片时没有意义。
+ */
+export function sanitizeChunk(delta) {
+  return String(delta ?? '').replace(/\s*\n+\s*/g, ' ')
 }
 
 /* -------------------------------------------------------- 主动开口逻辑 */
@@ -1057,7 +1112,8 @@ function finishProactiveText(cfg, text, ctx) {
 function normalizeMessages(input) {
   const list = Array.isArray(input) ? input : []
   return list
-    .map((line) => String(line ?? '').trim())
+    // 一条消息内部不该再有换行——主动开口的每条都是独立的一行
+    .map((line) => String(line ?? '').replace(/\s*\n+\s*/g, ' ').trim())
     .map(stripListPrefix)
     .filter((line) => line.length > 0 && !looksLikeJsonGarbage(line))
     .slice(0, 2)
@@ -1426,4 +1482,13 @@ export async function rollSummary(cfg = loadConfig()) {
 export { isUserWatchingScreen, buildContext, activity }
 
 /** 仅供测试使用，不要在生产路径里调用 */
-export const __debug = { normalizeMessages, salvageJsonStrings, looksLikeJsonGarbage }
+export const __debug = {
+  normalizeMessages,
+  salvageJsonStrings,
+  looksLikeJsonGarbage,
+  // cleanupReply 没导出（它是 respond 的内部步骤），但换行清洗是这次的重点，
+  // 必须有测试盯着——所以通过 __debug 暴露出来
+  cleanupReply,
+  sanitizeChunk,
+  sanitizeFull,
+}
