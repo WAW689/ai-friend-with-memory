@@ -43,6 +43,9 @@ export const PATHS = {
   self: path.join(DATA_DIR, 'self.md'),
   selfSnapshots: path.join(DATA_DIR, 'self-snapshots'),
   selfChangelog: path.join(DATA_DIR, 'self-changelog.jsonl'),
+  // 表情包：图直接丢进 stickers/，索引和描述在 stickerLib
+  stickers: path.join(DATA_DIR, 'stickers'),
+  stickerLib: path.join(DATA_DIR, 'stickers.json'),
   public: path.join(ROOT, 'public'),
 }
 
@@ -221,6 +224,23 @@ const DEFAULTS = {
     // 一次最多改几行。超过就整次拒绝——一次换一个人不叫成长。
     maxChangedLines: 3,
   },
+  // 表情包
+  sticker: {
+    // 关掉她就不发表情包了（清单不注入提示词）
+    enabled: true,
+    /*
+     * 两次表情包之间至少隔多少条**她的**消息。
+     *
+     * 这个闸门比什么都重要。真人聊天里表情包是点缀，不是主菜：
+     * 连着三条都发表情包会很怪。而且模型一旦发现"发表情包有反应"，
+     * 它会越用越多——不拦的话几天后就变成表情包机器人。
+     *
+     * 6 条是"平均每六七条里最多一张"的意思。
+     */
+    minMessagesBetween: 6,
+    // 每天最多几张（硬上限）
+    maxPerDay: 8,
+  },
 }
 
 /** 深合并：只覆盖用户显式写了的字段 */
@@ -302,6 +322,10 @@ function envOverride(cfg) {
   set(out.self, 'evolveAfterMessages', take(['FRIEND_SELF_AFTER_MESSAGES'], num))
   set(out.self, 'maxChangedLines', take(['FRIEND_SELF_MAX_LINES'], num))
 
+  set(out.sticker, 'enabled', take(['FRIEND_STICKER'], bool))
+  set(out.sticker, 'minMessagesBetween', take(['FRIEND_STICKER_MIN_GAP'], num))
+  set(out.sticker, 'maxPerDay', take(['FRIEND_STICKER_MAX_PER_DAY'], num))
+
   return out
 }
 
@@ -321,6 +345,16 @@ function bootstrapFiles() {
   if (!fs.existsSync(PATHS.self)) {
     fs.writeFileSync(PATHS.self, DEFAULT_SELF, 'utf8')
     log.info('已创建 data/self.md（她对自己的看法，会自己慢慢变）')
+  }
+  // 表情包：目录建好，让用户直接往里丢图。不预置任何图——
+  // 用什么表情包是个人口味，塞默认的反而要用户先删一遍。
+  ensureDir(PATHS.stickers)
+  if (!fs.existsSync(PATHS.stickerLib)) {
+    fs.writeFileSync(
+      PATHS.stickerLib,
+      JSON.stringify({ version: 1, items: [] }, null, 2) + '\n',
+      'utf8',
+    )
   }
 }
 

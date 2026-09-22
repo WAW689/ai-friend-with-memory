@@ -13,11 +13,13 @@ import { runBackup } from './backup.js'
 import { readRecentImages, saveImage } from './images.js'
 import { buildLifeSection, journalSince, readJournal, shouldLive, liveOneRound } from './life.js'
 import { buildSelfSection, evolveSelf, renderExperiences } from './self.js'
+import { markStickerUsed, stickerMenu } from './stickers.js'
 import {
   buildChatSystemPrompt,
   buildMemoryPrompt,
   buildProactiveDecisionPrompt,
   buildProactiveMessagePrompt,
+  buildStickerSection,
   buildSummaryPrompt,
   renderTranscript,
 } from './prompts.js'
@@ -48,6 +50,139 @@ export function writePersona(text) {
  */
 const FALLBACK_NAME = '朋友'
 let nameCache = { mtime: -1, name: FALLBACK_NAME }
+
+/* --------------------------------------------------------------- 表情包 */
+
+/*
+ * 标记格式：[表情包:3]。用中括号而不是别的，因为真人在微信里不会打这个，
+ * 所以模型跟着照做的概率高；而且万一它忘了发、直接把标记写进正文，
+ * 用户看到的也只是一串无害的文字，不会崩。
+ *
+ * 数字不限制位数：模型偶尔会写 100 这种越界编号，那时要**先抠出来**
+ * 再判定越界。如果正则本身不认，标记会原样留在正文里发给用户，
+ * 那比不发还难看。
+ */
+const STICKER_RE = /\[\s*表情包\s*[:：]\s*(\d{1,4})\s*\]/g
+
+/**
+ * 从模型的回复里抠出表情包标记，返回干净的正文和编号。
+ *
+ * 模型可能写得五花八门（全角冒号、多余空格、夹在句中），所以用宽松匹配，
+ * 而且**允许一个回复里只认第一张**——真人也只发一张。
+ */
+export function parseStickerMark(text) {
+  const raw = String(text ?? '')
+  let pick = null
+  const cleaned = raw
+    .replace(STICKER_RE, (_m, n) => {
+      if (pick === null) pick = Number(n)
+      return ''
+    })
+    // 抠掉标记后可能留下空行，收一下
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+
+  return { text: cleaned, index: pick }
+}
+
+/** 今天发了几张表情包 */
+function stickersToday(at = now()) {
+  const byDay = store.state.stickersByDay ?? {}
+  return byDay[localDateKey(at)] ?? 0
+}
+
+function noteStickerSent(at = now()) {
+  const byDay = store.state.stickersByDay ?? {}
+  const key = localDateKey(at)
+  byDay[key] = (byDay[key] ?? 0) + 1
+  // 只留最近 14 天，跟主动消息那边一个做法
+  const keys = Object.keys(byDay).sort()
+  while (keys.length > 14) delete byDay[keys.shift()]
+  store.state.stickersByDay = byDay
+
+  const mine = store.messages.filter((m) => m.role === 'assistant').length
+  store.state.lastStickerAtSeq = mine
+  store.state.lastStickerAt = at
+  store.saveState()
+}
+
+/**
+ * 现在允许发表情包吗。
+ *
+ * 这是整个功能最重要的一个函数。没有它，模型会**越用越多**——
+ * 一旦发现"发表情包对方有反应"，它就会每句都配一张，
+ * 几天后这个角色就变成表情包机器人了。
+ *
+ * 三道闸门：
+ *   1. 距上次发表情包，我们自己已经又说了几条（默认 6 条）
+ *   2. 今天没超过每日上限（默认 8 张）
+ *   3. 总开关没关
+ */
+export function stickerGate(cfg, at = now()) {
+  if (!cfg.sticker?.enabled) return { ok: false, reason: '表情包功能已关闭' }
+
+  const mine = store.messages.filter((m) => m.role === 'assistant').length
+  const lastSeq = store.state.lastStickerAtSeq
+  const gap = cfg.sticker.minMessagesBetween ?? 6
+
+  /*
+   * lastStickerAtSeq 记的是"发那张时我已经说了几条"。
+   * 刚重启时它是 undefined，这时不该拦（第一次总是允许的）。
+   */
+  if (typeof lastSeq === 'number') {
+    const since = mine - lastSeq
+    if (since < gap) {
+      return { ok: false, reason: `距上次表情包才说了 ${since} 条，隔 ${gap} 条再说` }
+    }
+  }
+
+  const today = stickersToday(at)
+  if (today >= (cfg.sticker.maxPerDay ?? 8)) {
+    return { ok: false, reason: `今天已经发过 ${today} 张了` }
+  }
+
+  return { ok: true }
+}
+
+/**
+ * 把模型给出的编号兑成真实的图片 id。
+ *
+ * 编号是清单里的**位置**，不是 id——所以必须通过同一份清单来翻译。
+ * 位置越界（模型自己编了个编号）就静默放弃：宁可不发，
+ * 也不能随便抓一张不相干的图发出去，那比不发尴尬得多。
+ *
+ * 注意这里**只做校验和翻译，不记流水**。记账（markStickerUsed /
+ * noteStickerSent）必须等消息真的 append 之后再做：noteStickerSent
+ * 记的是"发那张时我已经说了几条"，提前记会少数一条，间隔闸门就偏了。
+ */
+function resolveSticker(cfg, index, menuList) {
+  if (index === null || !Number.isFinite(index)) return null
+  const pos = Number(index) - 1
+  if (pos < 0 || pos >= menuList.length) {
+    log.info(`表情包编号 ${index} 超出清单（共 ${menuList.length} 张），这次不发`)
+    return null
+  }
+
+  const gate = stickerGate(cfg)
+  if (!gate.ok) {
+    log.info(`这次不发表情包：${gate.reason}`)
+    return null
+  }
+
+  return menuList[pos]
+}
+
+/** 消息真的发出去之后再记账 */
+function noteStickerDelivered(item) {
+  if (!item) return
+  markStickerUsed(item.id)
+  noteStickerSent()
+}
+
+/** 表情包统计（给界面看） */
+export function stickerStats() {
+  return { today: stickersToday(), lastAt: store.state.lastStickerAt ?? 0 }
+}
 
 export function characterName() {
   try {
@@ -138,6 +273,16 @@ function buildContext(cfg) {
   const lastUser = store.lastUserMessage()
   const lastAssistant = store.lastAssistantMessage()
 
+  /*
+   * 表情包清单。
+   *
+   * menu.list 必须跟着 text 一起传下去：模型回的编号是"清单里的第几个"，
+   * 而清单是**轮换**的（用得少的排前面），所以只有拿同一份 list
+   * 才能把编号翻译回真实的图片 id。分开生成两次就会错位。
+   */
+  const menu = stickerMenu()
+  const stickerSection = cfg.sticker?.enabled ? buildStickerSection(menu.text) : ''
+
   return {
     persona: readPersona(),
     memory: readMemory(),
@@ -146,6 +291,9 @@ function buildContext(cfg) {
     selfSection: buildSelfSection(),
     // 它自己的生活（不在聊天时也过日子），没有流水时是空串
     lifeSection: buildLifeSection(),
+    // 表情包清单 + 用法（没有表情包时是空串）
+    stickerSection,
+    stickerList: menu.list,
     recent,
     lastUserMessageAt: lastUser?.at ?? 0,
     lastAssistantMessageAt: lastAssistant?.at ?? 0,
@@ -283,10 +431,26 @@ export async function respond(text, hooks = {}) {
     return { message: fallback, full: fallback.text }
   }
 
-  const message = store.append({ role: 'assistant', text: cleaned })
+  /*
+   * 表情包标记要在存消息**之前**抠掉。
+   *
+   * 抠掉的原因不只是好看：[表情包:3] 是给程序看的坐标，留在这条消息里，
+   * 下一轮模型会在历史记录里看见自己上次写过它，于是更容易照抄格式，
+   * 甚至以为"我上次已经发过这张了"。正文干净了，历史才干净。
+   */
+  const parsed = parseStickerMark(cleaned)
+  const sticker = resolveSticker(cfg, parsed.index, ctx.stickerList)
+
+  const message = store.append({
+    role: 'assistant',
+    text: parsed.text || '（发表情）',
+    // 表情包复用图片通道：消息里只记 id，前端用 /api/image?id= 取
+    ...(sticker ? { meta: { images: [sticker.id], sticker: true } } : {}),
+  })
+  noteStickerDelivered(sticker)
   store.markAssistantMessage(message.at)
   scheduleBackgroundWork(cfg)
-  return { message, full: cleaned }
+  return { message, full: parsed.text, stickerId: sticker?.id ?? null }
 }
 
 /** 模型偶尔会带上引号或旁白，清一下 */
@@ -478,8 +642,16 @@ export async function runProactiveCheck(options = {}) {
 
   // 模型可能只给了 send=true 却没给内容，那就让它正经写一条
   let queue = normalizeMessages(decision?.messages)
+  /*
+   * 走"决策里直接给了消息"这条路时，没有表情包——清单只在
+   * 生成提示词里，决策提示词里不带清单（决策阶段不该操心发哪张图）。
+   * 想让她主动时也能发表情包，得走下面生成那条路。
+   */
+  let sticker = null
   if (queue.length === 0) {
-    queue = await generateProactiveMessages(cfg, ctx, decision?.mood)
+    const generated = await generateProactiveMessages(cfg, ctx, decision?.mood)
+    queue = generated.messages ?? []
+    sticker = generated.sticker ?? null
   }
   if (queue.length === 0) {
     if (!dryRun) scheduleRetryAfterDecline(cfg)
@@ -494,15 +666,52 @@ export async function runProactiveCheck(options = {}) {
 
   const sent = []
   for (let i = 0; i < queue.length; i++) {
+    /*
+     * 整条只有一张表情包（正文为空）的情况。
+     *
+     * 这是主动开口里很自然的一种：没什么可说，就想发个表情。
+     * 但文字为空的消息在前端会渲染成一个空气泡，所以正文给个占位符，
+     * 同时打上 sticker 标记让前端只画图、不画那个占位文字。
+     */
+    const onlySticker = Boolean(queue[i]?.stickerOnly)
+    if (onlySticker && !sticker) continue
+
     if (i > 0) {
       // 连发第二条前先"打一会儿字"
       await sleep(randInt(1200, 3200))
     }
-    const message = store.append({ role: 'assistant', text: queue[i], kind: 'proactive' })
+
+    /*
+     * 表情包挂在**第一条**上，而且必须在 append 那一刻就带上。
+     *
+     * 试过先 append 再改 meta，不行：messages.jsonl 是只追加的，
+     * 改内存里的对象不会落盘，重启后表情包就丢了。
+     * 所以这里先算好要不要挂，再一次性 append。
+     */
+    const attach = Boolean(sticker) && i === 0
+    const message = store.append({
+      role: 'assistant',
+      text: onlySticker ? '（发表情）' : queue[i],
+      ...(attach || onlySticker ? { meta: { images: [sticker.id], sticker: true } } : {}),
+      kind: 'proactive',
+    })
     store.noteProactive(message.at)
     sent.push(message)
-    log.info(`主动发送（${i + 1}/${queue.length}）：${truncate(queue[i], 40)}`)
+    log.info(
+      `主动发送（${i + 1}/${queue.length}）：` +
+        `${truncate(onlySticker ? '[表情包]' : queue[i], 40)}` +
+        `${attach && !onlySticker ? '（带表情包）' : ''}`,
+    )
   }
+
+  if (sent.length === 0) {
+    if (!dryRun) scheduleRetryAfterDecline(cfg)
+    recordProactiveEvent({ sent: false, reason: '只有表情包但没能兑出图片' })
+    return { sent: false, reason: '只有表情包但没能兑出图片' }
+  }
+
+  // 消息真的发出去了才记账
+  noteStickerDelivered(sticker)
 
   store.state.lastHoldReason = ''
   store.state.lastAssistantMessageAt = now()
@@ -556,6 +765,7 @@ async function generateProactiveMessages(cfg, ctx, mood) {
      */
     selfSection: ctx.selfSection,
     lifeSection: ctx.lifeSection,
+    stickerSection: ctx.stickerSection,
   })
 
   try {
@@ -564,30 +774,69 @@ async function generateProactiveMessages(cfg, ctx, mood) {
       maxTokens: 600,
     })
 
-    // 1) 正常路径：期望模型返回 {"messages": [...]}
-    const parsed = extractJson(text)
-    if (parsed && Array.isArray(parsed.messages)) {
-      return normalizeMessages(parsed.messages)
-    }
-
-    // 2) 解析失败但看得出是 JSON → 打捞里面已经写好的字符串，
-    //    绝不能把 JSON 原文当成消息发出去
-    if (/^\s*(?:```json)?\s*\{/.test(text) || /"messages"\s*:/.test(text)) {
-      const salvaged = normalizeMessages(salvageJsonStrings(text))
-      if (salvaged.length > 0) {
-        log.warn(`主动消息的 JSON 不完整，已打捞 ${salvaged.length} 条内容`)
-        return salvaged
-      }
-      log.warn('主动消息的 JSON 无法解析且打捞不到内容，这次跳过')
-      return []
-    }
-
-    // 3) 模型直接给了纯文本（没走 JSON）→ 按行切
-    return normalizeMessages(text.split('\n'))
+    return finishProactiveText(cfg, text, ctx)
   } catch (err) {
     log.warn(`主动消息生成失败：${err.message}`)
-    return []
+    return { messages: [], stickerId: null }
   }
+}
+
+/**
+ * 把模型给的原文变成"要发的消息 + 可选的一张表情包"。
+ *
+ * 三条解析路径（JSON / 打捞 / 纯文本）原来各自 return，现在统一收口——
+ * 因为表情包标记的抠取对三条路径是同一件事，分开写迟早漏一条。
+ */
+function finishProactiveText(cfg, text, ctx) {
+  let list = []
+
+  // 1) 正常路径：期望模型返回 {"messages": [...]}
+  const parsed = extractJson(text)
+  if (parsed && Array.isArray(parsed.messages)) {
+    list = normalizeMessages(parsed.messages)
+  } else if (/^\s*(?:```json)?\s*\{/.test(text) || /"messages"\s*:/.test(text)) {
+    // 2) 解析失败但看得出是 JSON → 打捞里面已经写好的字符串，
+    //    绝不能把 JSON 原文当成消息发出去
+    list = normalizeMessages(salvageJsonStrings(text))
+    if (list.length > 0) {
+      log.warn(`主动消息的 JSON 不完整，已打捞 ${list.length} 条内容`)
+    } else {
+      log.warn('主动消息的 JSON 无法解析且打捞不到内容，这次跳过')
+      return { messages: [], stickerId: null }
+    }
+  } else {
+    // 3) 模型直接给了纯文本（没走 JSON）→ 按行切
+    list = normalizeMessages(text.split('\n'))
+  }
+
+  /*
+   * 表情包标记可能出现在任意一条里（模型经常单独占一行写它）。
+   * 逐条抠掉，只认第一张——真人也只发一张。
+   */
+  let index = null
+  const cleaned = []
+  for (const line of list) {
+    const p = parseStickerMark(line)
+    if (p.index !== null && index === null) index = p.index
+    if (p.text) cleaned.push(p.text)
+  }
+
+  /*
+   * 全被标记吃掉了（模型只回了一行 [表情包:3]，没有正文）——
+   * 这是很自然的一种：想发个表情包但没什么可说。允许。
+   */
+  const item = resolveSticker(cfg, index, ctx.stickerList)
+  if (cleaned.length === 0 && item) {
+    return { messages: [{ text: '', stickerOnly: true }], sticker: item }
+  }
+
+  /*
+   * 只有标记、但表情包没兑出来（编号越界或撞了闸门）→ 这次什么都不发。
+   * 不能退化成发一条空消息。
+   */
+  if (cleaned.length === 0) return { messages: [], sticker: null }
+
+  return { messages: cleaned, sticker: item }
 }
 
 /**

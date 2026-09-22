@@ -280,6 +280,15 @@ export function toWireMessage(m) {
     // 图片只传 id，前端自己去 /api/image/<id> 取——
     // 把 base64 塞进每次的 SSE 快照里会拖垮移动端
     ...(images.length ? { images } : {}),
+    /*
+     * 表情包标记。
+     *
+     * 它跟普通图片的区别在前端要体现在两处：
+     *   1. 图要小得多（表情包是大图会很难看）
+     *   2. 只有图没有正文时，那句"（发表情）"占位符不能显示出来
+     * 所以这个标记必须传到前端，不能只留在服务端。
+     */
+    ...(m.meta?.sticker ? { sticker: true } : {}),
   }
 }
 

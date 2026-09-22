@@ -19,6 +19,12 @@ const S = {
   selfChanges: [],
   selfSnapshots: [],
   selfEnabled: true,
+  // 表情包
+  stickers: [],
+  stickerEnabled: true,
+  stickerTodayUsed: 0,
+  stickerMaxPerDay: 8,
+  stickerMinGap: 6,
   readiness: [],
   lastSeq: 0,
   streaming: false,
@@ -176,6 +182,15 @@ const Pending = { images: [] }
 const CHAT_IMAGE_MAX_BYTES = 6 * 1024 * 1024
 /** 长边压到这个尺寸。聊天看图这个分辨率绰绰有余，还能省 token。 */
 const CHAT_IMAGE_MAX_EDGE = 1280
+
+/*
+ * 表情包：长边上限和字节上限。
+ *
+ * 必须和服务端 stickers.js 里的 MAX_BYTES（2 MB）一致——
+ * 不一致会出现"前端以为压好了、后端拒收"的假失败，很难查。
+ */
+const STICKER_MAX_EDGE = 720
+const STICKER_MAX_BYTES = 2 * 1024 * 1024
 
 /**
  * 每次点击都新建一个文件选择框。
@@ -622,13 +637,15 @@ function renderMessages(options = {}) {
     const images = Array.isArray(m.images) ? m.images : []
     if (images.length) {
       bubble.classList.add('has-image')
+      // 表情包要单独标记：它比普通图片小得多，而且"只有图"时不显示占位文字
+      if (m.sticker) bubble.classList.add('has-sticker')
       const gallery = document.createElement('div')
       gallery.className = 'bubble-images'
       for (const id of images) {
         const img = document.createElement('img')
         // 图片单独走接口取，不塞进 SSE 快照里
         img.src = `/api/image?id=${encodeURIComponent(id)}&token=${encodeURIComponent(S.token)}`
-        img.alt = '图片'
+        img.alt = m.sticker ? '表情包' : '图片'
         img.loading = 'lazy'
         // 图片加载完会撑开高度，如果用户贴着底部就跟着顶上去
         img.addEventListener('load', () => {
@@ -637,7 +654,16 @@ function renderMessages(options = {}) {
         gallery.appendChild(img)
       }
       bubble.appendChild(gallery)
-      if (m.text) {
+
+      /*
+       * 正文只在"真的有话"时才显示。
+       *
+       * 服务端对"只想发个表情包"的消息存的是 '（发表情）' 这个占位符——
+       * 那是为了让消息非空（空文本在前端会渲染成空气泡），
+       * 但它不是她真的说的话，露出来会很出戏。
+       */
+      const hasRealText = m.text && m.text !== '（发表情）'
+      if (hasRealText) {
         const caption = document.createElement('div')
         caption.className = 'bubble-text'
         caption.textContent = m.text
@@ -888,6 +914,43 @@ async function compressImage(file) {
 
   // 兜底：用最小尺寸的最低质量
   return canvas.toDataURL('image/jpeg', 0.4)
+}
+
+/**
+ * 压缩一张**表情包**。
+ *
+ * 跟 compressImage（头像用）分开，因为目标尺寸不一样：
+ * 头像 256px 够了，表情包缩到 256 会糊得看不清字。
+ *
+ * 上限也放宽到 2 MB，跟服务端 stickers.js 的 MAX_BYTES 对齐——
+ * 对不上的话会出现"浏览器觉得压好了、服务端拒收"的假失败。
+ */
+async function compressSticker(file) {
+  const original = await readFileAsDataUrl(file)
+  if (dataUrlBytes(original) <= STICKER_MAX_BYTES) return original
+
+  const image = await loadImage(original)
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+  const sizes = [STICKER_MAX_EDGE, 512, 384, 256]
+  const qualities = [0.88, 0.78, 0.68, 0.55]
+
+  for (const size of sizes) {
+    const ratio = Math.min(size / image.width, size / image.height, 1)
+    const w = Math.max(1, Math.round(image.width * ratio))
+    const h = Math.max(1, Math.round(image.height * ratio))
+    canvas.width = w
+    canvas.height = h
+    ctx.clearRect(0, 0, w, h)
+    ctx.drawImage(image, 0, 0, w, h)
+
+    for (const quality of qualities) {
+      const out = canvas.toDataURL('image/jpeg', quality)
+      if (dataUrlBytes(out) <= STICKER_MAX_BYTES) return out
+    }
+  }
+
+  return canvas.toDataURL('image/jpeg', 0.5)
 }
 
 /* ------------------------------------------------------------------ SSE */
@@ -1229,6 +1292,109 @@ function buildSettings(tab) {
     )
   }
 
+  if (tab === 'sticker') {
+    /*
+     * 表情包管理。
+     *
+     * 两条入口都要有：上传，以及"我刚往文件夹里拷了一堆"的重扫。
+     * 后者很重要——一次准备几十张图，拖进文件夹比在手机上点几十次上传现实得多。
+     */
+    const items = S.stickers ?? []
+    const head = document.createElement('div')
+    head.className = 'field'
+    head.append(
+      label(`表情包（${items.length} 张，启用 ${items.filter((i) => i.enabled).length} 张）`),
+      hint(
+        S.stickerEnabled === false
+          ? '⚠ 表情包功能已关闭（FRIEND_STICKER=0），她不会发。'
+          : `今天她发了 ${S.stickerTodayUsed ?? 0} / ${S.stickerMaxPerDay ?? 8} 张。` +
+            `至少隔 ${S.stickerMinGap ?? 6} 条消息才会再发一张。`,
+      ),
+    )
+
+    const list = document.createElement('div')
+    list.className = 'sticker-list'
+
+    if (items.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'hint'
+      empty.textContent =
+        '还没有表情包。把图片拷到 D:\\PYF\\friend\\data\\stickers\\ 然后点下面的「重新扫描」，' +
+        '或者直接用「上传」按钮。描述会由模型看图自动生成，你不用自己写。'
+      list.append(empty)
+    }
+
+    for (const it of items) {
+      const row = document.createElement('div')
+      row.className = 'sticker-row' + (it.enabled ? '' : ' off')
+
+      const img = document.createElement('img')
+      img.className = 'sticker-thumb'
+      img.loading = 'lazy'
+      img.src = `/api/image?id=${it.id}`
+      img.alt = it.desc || '表情包'
+
+      const meta = document.createElement('div')
+      meta.className = 'sticker-meta'
+
+      const desc = document.createElement('textarea')
+      desc.className = 'sticker-desc'
+      desc.rows = 2
+      desc.value = it.desc || ''
+      desc.placeholder = '（还没有描述，她挑不到这张）'
+      desc.dataset.stickerDesc = it.id
+
+      const foot = document.createElement('div')
+      foot.className = 'sticker-foot'
+      foot.append(
+        valueLine(`用过 ${it.uses ?? 0} 次`),
+        (() => {
+          const b = document.createElement('button')
+          b.className = 'ghost tiny'
+          b.textContent = it.enabled ? '停用' : '启用'
+          b.dataset.stickerToggle = it.id
+          b.dataset.next = it.enabled ? '0' : '1'
+          return b
+        })(),
+        (() => {
+          const b = document.createElement('button')
+          b.className = 'danger tiny'
+          b.textContent = '删除'
+          b.dataset.stickerDelete = it.id
+          return b
+        })(),
+      )
+
+      meta.append(desc, foot)
+      row.append(img, meta)
+      list.append(row)
+    }
+
+    const upload = document.createElement('input')
+    upload.type = 'file'
+    upload.accept = 'image/*'
+    upload.multiple = true
+    upload.hidden = true
+    upload.id = 'sticker-file'
+
+    const bar = document.createElement('div')
+    bar.className = 'sticker-bar'
+
+    const pick = document.createElement('button')
+    pick.className = 'ghost'
+    pick.id = 'sticker-pick'
+    pick.textContent = '上传图片'
+
+    const rescan = document.createElement('button')
+    rescan.className = 'ghost'
+    rescan.id = 'sticker-rescan'
+    rescan.textContent = '重新扫描文件夹'
+
+    bar.append(pick, rescan, upload)
+
+    body.replaceChildren(head, bar, list, hint('改完描述点一下空白处就保存。停用的表情包不会出现在她的候选清单里。'))
+  }
+
   if (tab === 'memory') {
     const summaryBox = document.createElement('div')
     summaryBox.className = 'field'
@@ -1492,6 +1658,26 @@ function openSheet(tab) {
       if (S.activeTab === 'self') buildSettings('self')
     })
   }
+
+  if (S.activeTab === 'sticker') {
+    void loadStickers().then(() => {
+      if (S.activeTab === 'sticker') buildSettings('sticker')
+    })
+  }
+}
+
+/** 拉表情包列表 */
+async function loadStickers() {
+  try {
+    const data = await api('/api/stickers')
+    S.stickers = data.items ?? []
+    S.stickerEnabled = data.enabled
+    S.stickerTodayUsed = data.todayUsed
+    S.stickerMaxPerDay = data.maxPerDay
+    S.stickerMinGap = data.minMessagesBetween
+  } catch (err) {
+    toast(`读表情包失败：${err.message}`)
+  }
 }
 
 /** 拉她的自我：当前内容 + 变更流水 + 快照列表 */
@@ -1589,6 +1775,55 @@ function wireEvents() {
   $('send').addEventListener('click', send)
   const input = $('input')
   input.addEventListener('input', () => autoGrow(input))
+
+  /*
+   * 表情包：上传 + 描述编辑。
+   *
+   * 都用文档级委托——面板内容是每次重建的，绑在节点上会在重建后失效，
+   * 那是个很难查的"按钮突然没反应"。
+   */
+  document.addEventListener('change', async (e) => {
+    if (e.target.id !== 'sticker-file') return
+    const files = [...(e.target.files ?? [])].filter((f) => f.type.startsWith('image/'))
+    if (files.length === 0) return
+
+    toast(`正在上传 ${files.length} 张…`)
+    let ok = 0
+    for (const file of files) {
+      try {
+        // 表情包：长边 720 足够看清字，又不会太大
+        const dataUrl = await compressSticker(file)
+        await api('/api/stickers', { method: 'POST', body: { dataUrl } })
+        ok++
+      } catch (err) {
+        toast(`「${file.name}」失败：${err.message}`)
+      }
+    }
+    e.target.value = ''
+    await loadStickers()
+    if (S.activeTab === 'sticker') buildSettings('sticker')
+    toast(`已添加 ${ok} / ${files.length} 张`)
+  })
+
+  document.addEventListener(
+    'blur',
+    async (e) => {
+      const id = e.target.dataset?.stickerDesc
+      if (!id) return
+      const desc = e.target.value.trim()
+      const cached = (S.stickers ?? []).find((s) => s.id === id)
+      // 没改就不发请求——失焦会频繁触发
+      if (cached && cached.desc === desc) return
+      try {
+        await api('/api/stickers', { method: 'PUT', body: { id, desc } })
+        if (cached) cached.desc = desc
+      } catch (err) {
+        toast(`描述没保存：${err.message}`)
+      }
+    },
+    true,
+  )
+
   input.addEventListener('keydown', (e) => {
     // iPhone 上回车即发送；桌面按住 Shift 换行
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1629,10 +1864,51 @@ function wireEvents() {
 
   /* 面板里的动作按钮（事件委托，因为内容是动态生成的） */
   $('sheet-body').addEventListener('click', async (e) => {
+    /*
+     * 表情包行的按钮用的是 data 属性而不是 id——列表是循环渲染的，
+     * 用 id 会撞车（每行都想叫 "sticker-toggle"）。
+     */
+    const toggleId = e.target.dataset?.stickerToggle
+    const deleteId = e.target.dataset?.stickerDelete
+    if (toggleId || deleteId) {
+      e.target.disabled = true
+      try {
+        if (toggleId) {
+          const enabled = e.target.dataset.next === '1'
+          await api('/api/stickers', { method: 'PUT', body: { id: toggleId, enabled } })
+        } else {
+          if (!confirm('删掉这张表情包？（文件也会删掉）')) return
+          await api(`/api/stickers?id=${deleteId}`, { method: 'DELETE' })
+        }
+        await loadStickers()
+        buildSettings('sticker')
+      } catch (err) {
+        toast(`操作失败：${err.message}`)
+      } finally {
+        e.target.disabled = false
+      }
+      return
+    }
+
     const id = e.target.id
     if (!id) return
     e.target.disabled = true
     try {
+      if (id === 'sticker-pick') {
+        $('sticker-file')?.click()
+        return
+      }
+      if (id === 'sticker-rescan') {
+        const r = await api('/api/stickers/sync', { method: 'POST' })
+        await loadStickers()
+        buildSettings('sticker')
+        showActionResult(
+          true,
+          `新增 ${r.added ?? 0} 张，生成描述 ${r.described ?? 0} 张，清理 ${r.removed ?? 0} 张` +
+            ((r.errors ?? []).length ? `；${r.errors.length} 个问题` : ''),
+        )
+        return
+      }
       if (id === 'btn-test-model') {
         const r = await api('/api/test/model', { method: 'POST' })
         showActionResult(r.ok, r.ok ? '模型可用 ✓' : `失败：${r.message}`)

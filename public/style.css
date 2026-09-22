@@ -695,6 +695,92 @@ button:disabled { opacity: 0.45; }
 .change-line.add { color: #34d399; }
 .change-line.del { color: var(--danger); opacity: 0.85; }
 
+/* ------------------------------------------------------------ 表情包 */
+
+/*
+ * 表情包气泡。
+ *
+ * 关键是要比普通图片**小得多**：普通图片是"对方发来的照片"，
+ * 表情包是聊天里的点缀。用同一个尺寸会让整屏都是巨图，很难看。
+ */
+.bubble.has-sticker {
+  background: transparent;
+  padding: 0;
+  max-width: 55%;
+}
+
+.bubble.has-sticker .bubble-images img {
+  max-width: 100%;
+  max-height: 140px;
+  width: auto;
+  border-radius: 12px;
+}
+
+.bubble.has-sticker .bubble-text {
+  margin-top: 4px;
+}
+
+/* 表情包管理列表 */
+.sticker-bar {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.sticker-bar button { flex: 1; }
+
+.sticker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.sticker-row {
+  display: flex;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.sticker-row.off { opacity: 0.45; }
+
+.sticker-thumb {
+  width: 60px;
+  height: 60px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.1);
+  flex-shrink: 0;
+}
+
+.sticker-meta { flex: 1; min-width: 0; }
+
+.sticker-desc {
+  width: 100%;
+  font-size: 13px;
+  resize: vertical;
+  min-height: 38px;
+}
+
+.sticker-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+button.tiny {
+  padding: 3px 9px;
+  font-size: 12px;
+  border-radius: 8px;
+  flex: 0 0 auto;
+}
+
 /* ------------------------------------------------------------------ Toast */
 
 .toast {

@@ -86,7 +86,7 @@ export function renderTranscript(messages, { maxChars = 12000 } = {}) {
 }
 
 /** 聊天用的 system prompt */
-export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection, selfSection }) {
+export function buildChatSystemPrompt({ persona, memory, summary, styleHint, lastExchangeAt, lifeSection, selfSection, stickerSection }) {
   const sections = []
 
   /*
@@ -143,6 +143,17 @@ ${memory.trim() || '（暂时还没有关于对方的长期记忆）'}`)
   if (summary) {
     sections.push(`【之前聊过的内容摘要】
 ${summary.trim()}`)
+  }
+
+  /*
+   * 表情包清单放最后。
+   *
+   * 位置有讲究：它是**表达手段**，不是身份或记忆。放太前面会让
+   * 模型把"发表情包"当成这轮对话的任务，于是动不动就配一张。
+   * 放在摘要之后、其他情况之前，是"顺便告诉你还有这么个选项"的语气。
+   */
+  if (stickerSection) {
+    sections.push(stickerSection)
   }
 
   // 明确告诉它"隔了多久"。否则它会把隔夜的对话当成刚才还在聊，
@@ -312,13 +323,14 @@ export function buildProactiveMessagePrompt({
   mood,
   lifeSection,
   selfSection,
+  stickerSection,
 }) {
   const system = `【你是谁】
 ${persona.trim()}
 
 【关于对方，你记得的事】
 ${memory.trim() || '（暂时还没有）'}
-${selfSection ? `\n${selfSection}\n` : ''}${lifeSection ? `\n${lifeSection}\n` : ''}
+${selfSection ? `\n${selfSection}\n` : ''}${lifeSection ? `\n${lifeSection}\n` : ''}${stickerSection ? `\n${stickerSection}\n` : ''}
 
 【你现在要做什么】
 你刚刚自己拿起手机，想给对方发条消息。**这不是在回复他**——
@@ -456,6 +468,37 @@ ${transcript || '（这段时间没聊什么）'}
     { role: 'system', content: system },
     { role: 'user', content: '写吧。如果没有新东西，就原样返回。' },
   ]
+}
+
+/**
+ * 表情包清单，注入聊天和主动消息的提示词。
+ *
+ * 这是"她自己挑"的全部依据：判断的时候模型**看不见图**
+ * （DeepSeek 的视觉理解在另一条接口上，混进每轮判断又贵又没必要），
+ * 所以它只能靠这份文字清单来决定发哪张。
+ *
+ * 因此清单的写法很关键：
+ * - 必须带上编号，它靠编号指定要发哪张
+ * - 必须说清"怎么发"——用 [表情包:N] 这种标记，好在正文里抠出来
+ * - 必须给出**克制**的用法说明。不写的话它会每句都配一张，
+ *   几次之后就变成表情包机器人。这是这个功能最容易翻车的地方。
+ */
+export function buildStickerSection(menuText) {
+  if (!menuText || !menuText.trim()) return ''
+
+  return `【你可以发的表情包】
+${menuText.trim()}
+
+什么时候发：
+- 想表达但懒得打字的时候（无语、想笑、摆烂、没眼看）就发一张。
+- 一整条只发一张就够了，或者配一句短话。
+- **不要连着发**，也不要每条都发。上次发表情包还没隔几条，这次就别发了。
+- 不合适的时候就别发——大部分消息是不带表情包的。
+
+怎么发（重要）：
+- 在回复的最后单独起一行写 \`[表情包:编号]\`，比如 \`[表情包:3]\`。
+- 编号必须是上面清单里的数字。**不要自己编编号**，也不要发清单外的图。
+- 正文里不要提表情包本身，也不要解释"我发了个表情包"。`
 }
 
 /** 系统提示注入的运行时上下文（给 DSH 侧用） */

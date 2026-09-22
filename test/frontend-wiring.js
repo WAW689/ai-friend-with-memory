@@ -116,6 +116,26 @@ const selfChecks = [
   ['关闭成长时界面会提示', /成长功能已关闭/.test(js)],
 ]
 
+// 表情包
+const stickerChecks = [
+  ['HTML 有「表情包」标签', /data-tab="sticker"/.test(html)],
+  ['JS 有 sticker 分支的渲染', /tab === 'sticker'/.test(js)],
+  ['JS 单独拉 /api/stickers', /api\('\/api\/stickers'\)/.test(js)],
+  ['JS 能上传', /api\('\/api\/stickers', \{ method: 'POST'/.test(js)],
+  ['JS 能改描述和启停', /api\('\/api\/stickers', \{ method: 'PUT'/.test(js)],
+  ['JS 能删除', /api\/stickers\?id=/.test(js)],
+  ['JS 能重新扫描文件夹', /api\/stickers\/sync/.test(js)],
+  ['上传用 multiple（一次能选多张）', /upload\.multiple = true/.test(js)],
+  ['表情包有独立的压缩函数', /async function compressSticker/.test(js)],
+  ['压缩上限与服务端一致', /STICKER_MAX_BYTES = 2 \* 1024 \* 1024/.test(js)],
+  ['表情包气泡单独标记', /has-sticker/.test(js)],
+  ['占位文字不会显示出来', /'（发表情）'/.test(js)],
+  ['CSS 有 .has-sticker', /\.bubble\.has-sticker\s*\{/.test(css)],
+  ['CSS 表情包比普通图小', /\.has-sticker[\s\S]{0,200}max-height/.test(css)],
+  ['CSS 有 .sticker-row', /\.sticker-row\s*\{/.test(css)],
+  ['描述编辑用事件委托（重建后不失效）', /dataset\?\.stickerDesc/.test(js)],
+]
+
 let failed = 0
 for (const [name, ok] of checks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
@@ -148,6 +168,12 @@ for (const [name, ok] of animationChecks) {
 
 console.log('\n她的变化')
 for (const [name, ok] of selfChecks) {
+  console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
+  if (!ok) failed++
+}
+
+console.log('\n表情包')
+for (const [name, ok] of stickerChecks) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}`)
   if (!ok) failed++
 }

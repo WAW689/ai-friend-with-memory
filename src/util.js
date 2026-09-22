@@ -2,6 +2,7 @@
  * 基础工具：时间、随机、文件读写、日志。
  * 这个项目刻意做到零第三方依赖，所以这里的东西都是手写的。
  */
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -178,6 +179,18 @@ export function randomToken(bytes = 24) {
   const buf = new Uint8Array(bytes)
   crypto.getRandomValues(buf)
   return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * 文件内容的短哈希（16 个十六进制字符）。
+ *
+ * 用来给表情包做**内容寻址的 id**：
+ *   - 同一张图不管叫什么文件名、放哪个子目录，id 都一样 → 自动去重
+ *   - id 跟着内容走，所以浏览器可以永久缓存（内容变了 id 就变了）
+ *   - 不依赖随机数，重启、换机器都稳定，不会每次启动都重新算一遍描述
+ */
+export function contentHash(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)
 }
 
 /** 截断字符串，用于日志 */

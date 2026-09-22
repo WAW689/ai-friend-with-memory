@@ -86,6 +86,14 @@ export function runBackup(options = {}) {
      */
     ['self.md', PATHS.self],
     ['self-changelog.jsonl', PATHS.selfChangelog],
+    /*
+     * 表情包索引。
+     *
+     * 图片文件本身**不备份**：那是用户自己丢进去的原图，丢了再放一次就行，
+     * 而且几十张图会让每天的备份迅速膨胀（14 天保留）。
+     * 但索引要备——里面的描述是模型逐张看图生成的，重来一遍又要花钱花时间。
+     */
+    ['stickers.json', PATHS.stickerLib],
   ]
   for (const [name, source] of plainFiles) {
     if (!fs.existsSync(source)) continue

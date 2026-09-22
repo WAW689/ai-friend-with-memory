@@ -11,7 +11,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { authorize, extractToken } from './auth.js'
 import { BACKUP_ROOT, listBackups, runBackup } from './backup.js'
-import { findImage, imageStats, MAX_IMAGE_BYTES } from './images.js'
+import { findImage, imageStats, MAX_IMAGE_BYTES, parseDataUrl } from './images.js'
 import {
   clearAvatar,
   describeAvatar,
@@ -50,8 +50,17 @@ import {
   replaceSelf,
   restoreSelf,
 } from './self.js'
+import {
+  STICKER_EXT_MIME,
+  getSticker,
+  readLib,
+  stickerFile,
+  stickerStats,
+  syncStickers,
+  writeLib,
+} from './stickers.js'
 import { store, toWireMessage } from './storage.js'
-import { appendJsonl, log, now, truncate } from './util.js'
+import { appendJsonl, contentHash, ensureDir, log, now, truncate } from './util.js'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -499,6 +508,109 @@ async function handleApi(req, res, url, cfg) {
       const body = await readBody(req)
       writePersona(String(body.persona ?? ''))
       return sendJson(res, 200, { ok: true, persona: readPersona() })
+    }
+
+    /* ---------------- 表情包 ---------------- */
+    /*
+     * 入口设计成"丢图进去就行"：用户可以把图直接拷到 data/stickers/，
+     * 也可以从这个面板上传。两条路最后都汇到 syncStickers()。
+     *
+     * 描述由模型看图自动生成——**这是刻意的**：如果每加一张都要
+     * 手写一句"这是什么表情"，没人会加满三十张，这功能就废了。
+     */
+    case 'GET /api/stickers': {
+      const lib = readLib()
+      const stats = stickerStats()
+      return sendJson(res, 200, {
+        enabled: cfg.sticker?.enabled !== false,
+        items: lib.items.map((it) => ({
+          id: it.id,
+          mime: it.mime,
+          bytes: it.bytes,
+          desc: it.desc ?? '',
+          enabled: it.enabled !== false,
+          uses: it.uses ?? 0,
+          addedAt: it.addedAt ?? 0,
+        })),
+        todayUsed: stats.today,
+        maxPerDay: cfg.sticker?.maxPerDay ?? 8,
+        minMessagesBetween: cfg.sticker?.minMessagesBetween ?? 6,
+      })
+    }
+
+    /** 扫描文件夹：新图入库 + 自动生成描述 */
+    case 'POST /api/stickers/sync': {
+      const result = await syncStickers(cfg)
+      return sendJson(res, 200, { ok: true, ...result })
+    }
+
+    /** 上传一张（前端已把图压成 data URL） */
+    case 'POST /api/stickers': {
+      const body = await readBody(req, 4_000_000)
+      const dataUrl = String(body.dataUrl ?? '')
+      if (!dataUrl.startsWith('data:image/')) {
+        return sendError(res, 400, '需要一张图片')
+      }
+
+      let parsed
+      try {
+        parsed = parseDataUrl(dataUrl)
+      } catch (err) {
+        return sendError(res, 400, err.message)
+      }
+
+      const ext = Object.entries(STICKER_EXT_MIME).find(([, m]) => m === parsed.mime)?.[0]
+      if (!ext) return sendError(res, 400, `不支持的格式：${parsed.mime}`)
+
+      ensureDir(PATHS.stickers)
+      const buf = Buffer.from(parsed.base64, 'base64')
+      /*
+       * 文件名用内容哈希 → 同一张图重复上传只会得到同一个文件，
+       * 自动去重。也不用担心文件名冲突或者奇怪的中文名。
+       */
+      const id = contentHash(buf)
+      fs.writeFileSync(path.join(PATHS.stickers, `sticker-${id}${ext}`), buf)
+
+      const result = await syncStickers(cfg)
+      const item = getSticker(id)
+      return sendJson(res, 200, { ok: true, id, desc: item?.desc ?? '', ...result })
+    }
+
+    /** 改描述 / 启用停用 */
+    case 'PUT /api/stickers': {
+      const body = await readBody(req)
+      const id = String(body.id ?? '')
+      if (!/^[a-f0-9]{6,32}$/.test(id)) return sendError(res, 400, 'id 不合法')
+
+      const lib = readLib()
+      const item = lib.items.find((it) => it.id === id)
+      if (!item) return sendError(res, 404, '没有这张表情包')
+
+      if (typeof body.desc === 'string') item.desc = body.desc.trim().slice(0, 40)
+      if (typeof body.enabled === 'boolean') item.enabled = body.enabled
+
+      writeStickerLib(lib)
+      return sendJson(res, 200, { ok: true, item })
+    }
+
+    /** 删掉一张（同时删文件） */
+    case 'DELETE /api/stickers': {
+      const id = url.searchParams.get('id') ?? ''
+      const item = getSticker(id)
+      if (!item) return sendError(res, 404, '没有这张表情包')
+
+      const file = stickerFile(item)
+      if (file) {
+        try {
+          fs.rmSync(file, { force: true })
+        } catch (err) {
+          log.warn(`删表情包文件失败：${err.message}`)
+        }
+      }
+      const lib = readLib()
+      lib.items = lib.items.filter((it) => it.id !== id)
+      writeStickerLib(lib)
+      return sendJson(res, 200, { ok: true })
     }
 
     /* ---------------- 她的自我（会变的那一层） ---------------- */

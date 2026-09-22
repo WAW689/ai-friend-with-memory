@@ -87,6 +87,7 @@ const OFFLINE = [
   ['提示词与时间感知', 'prompts.js'],
   ['生活流水', 'life.js'],
   ['会变的自我', 'self.js'],
+  ['表情包', 'stickers.js'],
   ['备份与消息序号', 'backup-and-seq.js'],
   ['逐字动画算法', 'typing-animation.js'],
   ['头像', 'avatar.js'],
