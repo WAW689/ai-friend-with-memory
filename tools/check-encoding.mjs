@@ -71,3 +71,42 @@ console.log('')
 console.log('=== UTF-8 BOM（.ps1 需要，其他不需要）===')
 if (bomFiles.length === 0) console.log('  无')
 else for (const f of bomFiles) console.log('  · ' + f)
+
+/*
+ * 少了 BOM 的 .ps1 是**故障**，不是风格问题。
+ *
+ * Windows PowerShell 5.1 读没有 BOM 的文件时按系统 ANSI 代码页解码
+ * （中文 Windows 上是 GBK），于是文件里所有中文变成乱码，
+ * 报一串语法错误——而文件本身完全正确，人会以为是脚本写错了。
+ * 踩过一次（脚本原来就没 BOM），补上之后任何编辑都可能再丢，
+ * 所以这里直接把它算成失败。
+ */
+const ps1NoBom = []
+walk2('.')
+function walk2(dir) {
+  for (const it of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, it.name)
+    if (it.isDirectory()) {
+      if (!SKIP_DIRS.has(it.name) && !it.name.startsWith('tmp')) walk2(p)
+      continue
+    }
+    if (path.extname(it.name).toLowerCase() !== '.ps1') continue
+    const b = fs.readFileSync(p)
+    const hasBom = b.length >= 3 && b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf
+    // 纯 ASCII 的 .ps1 不带 BOM 也没事（没有中文可乱码）
+    const hasNonAscii = b.some((x) => x > 0x7f)
+    if (!hasBom && hasNonAscii) ps1NoBom.push(p)
+  }
+}
+
+console.log('')
+console.log('=== .ps1 缺 BOM（有中文就必须有）===')
+if (ps1NoBom.length === 0) console.log('  无')
+else {
+  for (const f of ps1NoBom) console.log('  ! ' + f)
+  console.log('')
+  console.log('  PowerShell 5.1 会把没有 BOM 的文件当 GBK 读，中文全乱、报一串假语法错误。')
+  console.log('  补 BOM（只加三个字节，不要重新编码）：')
+  console.log('    node tools/fix-bom.mjs')
+  process.exitCode = 1
+}

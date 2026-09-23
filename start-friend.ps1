@@ -333,8 +333,11 @@ function Start-Background {
 
   New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
   $stamp = Get-Date -Format 'yyyy-MM-dd'
-  $outLog = Join-Path $LogDir "friend-$stamp.log"
-  $errLog = Join-Path $LogDir "friend-$stamp.err.log"
+  # 日志归 server.js 自己写（logs\friend-<日期>.log）。
+  # 这里的重定向只兜住"日志系统起来之前"的输出（启动就崩、堆栈之类），
+  # 所以落到另一个文件名上——写同一个文件会变成两份、互相交错。
+  $outLog = Join-Path $LogDir "boot-$stamp.log"
+  $errLog = Join-Path $LogDir "boot-$stamp.err.log"
 
   # 用 Start-Process 让它脱离当前终端独立运行；
   # 这样关掉这个 PowerShell 窗口服务也不会停。
@@ -352,7 +355,7 @@ function Start-Background {
     Start-Sleep -Milliseconds 700
     if (Test-ServiceUp) {
       Write-Ok "服务已就绪：http://127.0.0.1:$Port"
-      Write-Step "日志：$outLog"
+      Write-Step "日志：$(Join-Path $LogDir "friend-$stamp.log")"
       return
     }
     if ($proc.HasExited) {

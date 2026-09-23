@@ -317,6 +317,53 @@ await checkAsync('import src/reset.js 不该写任何数据（真实事故）', 
   return '导入安全 + 有 --force 闸门'
 })
 
+/* ------------------------------------------------ 4.5 日志必须落文件 */
+
+console.log('')
+console.log('  日志不能只打屏幕')
+
+await checkAsync('日志会落文件（屏幕上打不出来时，这是唯一的线索）', async () => {
+  /*
+   * 这条盯的是一个"服务还活着，但网页打不开、消息也不回"的故障。
+   *
+   * 根因：服务由计划任务拉起时没有控制台，stdout 是一个**没人读的管道**。
+   * Windows 上往管道写是同步的，缓冲满之后 console.log 会**永远阻塞**——
+   * 进程在、端口在监听、CPU 是 0，但事件循环停住了。跑了约两小时才发作，
+   * 而因为原来日志只打屏幕、又没重定向，**连一行都没留下**。
+   *
+   * 所以现在日志一定落文件；只有确定写 stdout 不会阻塞时才顺便打屏幕。
+   */
+  const { log, logFilePath } = await import('../src/util.js')
+  const target = logFilePath()
+  assert(
+    target.startsWith(process.env.FRIEND_LOG_DIR),
+    `日志没写到隔离目录，而是 ${target}`,
+  )
+
+  log.info('回归测试：这一行必须出现在文件里')
+  const text = fs.readFileSync(target, 'utf8')
+  assert(text.includes('回归测试：这一行必须出现在文件里'), '日志没进文件')
+
+  /*
+   * 时间戳必须是**本地时间**。
+   *
+   * 原来用的是 toISOString()，于是日志里的时间比手机上的时间早 8 小时
+   * （东八区），排查时对不上号——"她 15:40 还在发消息"其实是 23:40。
+   * 用"跟现在差不超过 5 秒"来判断，比对比字符串稳。
+   */
+  const line = text
+    .trim()
+    .split('\n')
+    .filter((l) => l.includes('这一行必须出现在文件里'))
+    .pop()
+  const m = line.match(/^\[(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\]/)
+  assert(m, `日志行没有时间戳：${line.slice(0, 40)}`)
+  const logged = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime()
+  const drift = Math.abs(Date.now() - logged)
+  assert(drift < 5000, `日志时间戳和现在差 ${Math.round(drift / 1000)} 秒 —— 大概写成 UTC 了`)
+  return path.relative(ROOT, target) + ' · 本地时间正确'
+})
+
 /* ------------------------------------------------ 5. 导入不存在的导出 */
 
 console.log('')

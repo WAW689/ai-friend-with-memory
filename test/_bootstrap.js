@@ -37,4 +37,25 @@ if (!isAggregator && !process.env.FRIEND_DATA_DIR) {
 // 测试绝不允许推送到用户手机（bark.js 也有一层，这里是双保险）
 process.env.FRIEND_NO_PUSH = '1'
 
+/*
+ * 日志也要隔离。
+ *
+ * 日志默认写在项目下的 logs/，而测试会跑几十个进程、每个都写几行——
+ * 不隔离的话，真实的 logs/friend-<今天>.log 会被测试输出灌满，
+ * 出问题时真正有用的那几行反而淹掉了。
+ *
+ * 放在**数据目录里面**（<隔离目录>/logs）：数据目录是测试自己的地盘，
+ * 聚合器每次跑之前会整份删掉，日志也就跟着干净了。
+ * 不要再按 process.argv 猜目录名——聚合器是在 worker 线程里跑各个套件的，
+ * 那里的 argv 是空的，猜出来会变成 tmp-unknown，跨次运行一直追加。
+ */
+if (!process.env.FRIEND_LOG_DIR) {
+  // 兜一层：万一没人设 FRIEND_DATA_DIR，也不能让这里抛异常
+  const base = process.env.FRIEND_DATA_DIR || path.join(here, 'tmp')
+  const logDir = path.join(base, 'logs')
+  fs.mkdirSync(logDir, { recursive: true })
+  process.env.FRIEND_LOG_DIR = logDir
+}
+
 export const DATA_DIR = process.env.FRIEND_DATA_DIR ?? '(聚合器共享目录)'
+export const LOG_DIR = process.env.FRIEND_LOG_DIR

@@ -136,6 +136,10 @@ check('自己拼一份完整提示词，八段都该能核对通过', () => {
     lifeDaysSection: seg('days'),
     stickerSection: seg('sticker'),
     nowText: seg('time'),
+    // 这两段只在"她此刻在忙/在困"时才有内容。少给一段，
+    // 只要它恰好非空，这条就会误报成"没拼进提示词"。
+    busySection: seg('busy'),
+    sleepySection: seg('sleepy'),
   })
   const pro = (() => {
     const m = buildProactiveMessagePrompt({

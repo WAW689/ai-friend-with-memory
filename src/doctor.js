@@ -27,6 +27,7 @@ import { describeWeather, peekSunTimes, peekWeather } from './weather.js'
 import { peekPending } from './recall.js'
 import { buildBusySection, busyState } from './busy.js'
 import { buildSleepySection, sleepiness } from './sleepy.js'
+import { shortActivity } from './activity.js'
 import { buildLifeDaysSection, daysStats } from './life-days.js'
 
 /** 粗略的 token 估算：中文一个字约 1 token，英文 4 字符约 1 token */
@@ -77,6 +78,14 @@ export function runDoctor(cfg = loadConfig(), opts = {}) {
   const busySection = buildBusySection(busy)
   const sleepy = sleepiness()
   const sleepySection = buildSleepySection(sleepy)
+  /*
+   * 作息是从哪来的，这段话两个分支都要用。
+   * parsed=false 是**兜底值**，得显眼地说出来——她明明写着"早上九点起"，
+   * 而程序用的是兜底作息时，表现会莫名地不对，却没有任何报错。
+   */
+  const sleepOrigin =
+    `作息解析成 ${sleepy.sleepHour} 点睡、${sleepy.wakeHour} 点起` +
+    (sleepy.parsed ? '' : '，⚠ 是从兜底值来的——data/life.md 里的作息没解析出来')
   const lifeDaysSection = buildLifeDaysSection()
   const dayStats = daysStats()
 
@@ -196,11 +205,19 @@ export function runDoctor(cfg = loadConfig(), opts = {}) {
       text: busySection,
       scope: 'chat',
       required: false,
-      emptyHint: busy.enabled === false
+      /*
+       * 三种情况都得有话，不能拿"——"占位。
+       *
+       * light（能看手机）那档现在**故意不注入**——它不延迟回复，
+       * 给她这段反而会让她编一句"刚在忙"。这里是把这个"故意的空"
+       * 说清楚，不然体检会把它报成故障。
+       */
+      emptyHint: cfg.busy?.enabled === false
         ? '在忙功能已关闭（FRIEND_BUSY=0），她会秒回。'
         : busy.level === 'idle'
           ? '她这会儿不忙（最近 45 分钟内没有新流水）。这是正常的——大部分时候她都没在忙。'
-          : '——',
+          : `她这会儿「${shortActivity(busy.text) || busy.text}」，属于"在做但能看手机"：` +
+            '不延迟回复，所以这段故意不注入（免得她说"刚在忙"，可她根本没被耽误）。',
     },
     {
       id: 'sleepy',
@@ -211,11 +228,7 @@ export function runDoctor(cfg = loadConfig(), opts = {}) {
       required: false,
       emptyHint: cfg.sleepy?.enabled === false
         ? '困劲儿已关闭（FRIEND_SLEEPY=0）。'
-        : sleepy.level === 0
-          ? `她这会儿清醒（作息解析成 ${sleepy.sleepHour} 点睡、${sleepy.wakeHour} 点起${
-              sleepy.parsed ? '' : '，⚠ 是从兜底值来的——data/life.md 里的作息没解析出来'
-            }）。`
-          : '——',
+        : `她这会儿${sleepy.label}（${sleepOrigin}）。`,
     },
   ]
 

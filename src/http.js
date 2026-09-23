@@ -867,7 +867,9 @@ export function printBanner(cfg, port) {
     lines.push('  ✓ 模型和推送都配好了')
   }
   lines.push('')
-  process.stdout.write(`${lines.join('\n')}\n`)
+  // 走 log.line 而不是 process.stdout.write：横幅也要进日志文件
+  // （由计划任务拉起时根本没有终端，只打屏幕就等于没打）
+  log.line(lines.join('\n'))
 }
 
 /** 找出本机所有局域网 IPv4 地址 */

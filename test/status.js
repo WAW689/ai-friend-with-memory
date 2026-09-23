@@ -58,6 +58,26 @@ const justNow = (text, minutesAgo = 5) =>
 
 const clearJournal = () => writeJournal([])
 
+/*
+ * "她醒着的下午三点" —— 状态相关的断言都钉在这个时刻上。
+ *
+ * 本来这些用例直接用"现在"，于是它们**随运行时刻变化**：
+ * 她 3 点睡 12 点起，所以上午十点跑测试时她正在睡，
+ * "忙 > 空闲"就成了"asleep > here"，一条条全红——可代码什么问题都没有。
+ * 这个套件真的在上午十点集体红过一次。
+ *
+ * 时间敏感的断言必须自己指定时刻，跟她现在几点睡无关。
+ */
+const AWAKE_HOUR = 15
+const awakeAt = () => {
+  const d = new Date()
+  d.setHours(AWAKE_HOUR, 0, 0, 0)
+  return d.getTime()
+}
+/** 造一条"她醒着那个时刻刚刚在忙"的流水 */
+const busyAt = (text, minutesAgo = 5) =>
+  writeJournal([{ at: awakeAt() - minutesAgo * MIN, text }])
+
 /** 造一个今天某点的绝对时间 */
 const todayAt = (h, m = 0) => {
   const d = new Date()
@@ -135,8 +155,8 @@ check('睡着 > 忙（她睡着了就不该说在煮面）', () => {
 })
 
 check('忙 > 空闲', () => {
-  justNow('起来煮了碗西红柿鸡蛋面')
-  const s = herState(cfg)
+  busyAt('起来煮了碗西红柿鸡蛋面')
+  const s = herState(cfg, { at: awakeAt() })
   assert(s.key === 'busy' || s.key === 'around', `应该在忙，实际 ${s.key}`)
   return s.label
 })
@@ -170,17 +190,17 @@ check('睡着时不能说成"勿扰"（那是拒绝感）', () => {
 })
 
 check('忙时给出"多久之前记下的"', () => {
-  justNow('起来煮了碗面', 12)
-  const s = herState(cfg)
+  busyAt('起来煮了碗面', 12)
+  const s = herState(cfg, { at: awakeAt() })
   assert(/\d+ 分钟前/.test(s.detail), '没给出多久之前：' + s.detail)
   return s.detail
 })
 
 check('heavy 和 light 的措辞不同（区别是"能不能看手机"）', () => {
-  justNow('下楼拿快递')
-  const heavy = herState(cfg)
-  justNow('改到第四版')
-  const light = herState(cfg)
+  busyAt('下楼拿快递')
+  const heavy = herState(cfg, { at: awakeAt() })
+  busyAt('改到第四版')
+  const light = herState(cfg, { at: awakeAt() })
 
   assert(/^在/.test(heavy.label), 'heavy 应该以"在"开头：' + heavy.label)
   assert(!/能看手机/.test(heavy.label), 'heavy 不该说能看手机：' + heavy.label)
@@ -198,9 +218,9 @@ check('状态说"在忙"（heavy）时，延迟**必须**大于 0', () => {
    */
   const cases = ['起来煮了碗西红柿鸡蛋面', '刚刚下楼拿快递']
   for (const text of cases) {
-    justNow(text)
-    const s = herState(cfg)
-    const delay = replyDelay(cfg)
+    busyAt(text)
+    const s = herState(cfg, { at: awakeAt() })
+    const delay = replyDelay(cfg, { at: awakeAt() })
     assert(s.key === 'busy', `「${text}」该显示在忙，实际 ${s.key}（${s.label}）`)
     assert(delay > 0, `状态显示「${s.label}」但延迟是 0 —— 会穿帮`)
     assert(/慢/.test(s.detail), `说在忙却没说会慢一点：${s.detail}`)
@@ -219,9 +239,9 @@ check('状态说"能看手机"（light）时，延迟**必须**是 0，文案也
    * 现在 light 只反映"她在干嘛"，不换成分秒；相应地，文案里也不能
    * 再出现"回得可能慢一点"——那是界面在替她许一个不兑现的承诺。
    */
-  justNow('三百块的活改八遍')
-  const s = herState(cfg)
-  const delay = replyDelay(cfg)
+  busyAt('三百块的活改八遍')
+  const s = herState(cfg, { at: awakeAt() })
+  const delay = replyDelay(cfg, { at: awakeAt() })
   assert(s.key === 'around', `该显示 around，实际 ${s.key}（${s.label}）`)
   assert(/能看手机/.test(s.label), 'light 该说能看手机：' + s.label)
   assert(delay === 0, `说"能看手机"却延迟了 ${delay / 1000} 秒 —— 又穿帮了`)
@@ -242,8 +262,8 @@ check('状态说"在的"时，延迟**必须**是 0', () => {
 
 check('同一时刻算两次结果一致（没有随机性）', () => {
   // 状态栏不能被随机数影响，否则每次刷新都可能变
-  justNow('下楼拿快递')
-  const at = Date.now()
+  busyAt('下楼拿快递')
+  const at = awakeAt()
   const a = herState(cfg, { at })
   const b = herState(cfg, { at })
   const c = herState(cfg, { at })
@@ -265,8 +285,8 @@ check('stateForUI 的字段齐全', () => {
 })
 
 check('关掉在忙功能后不再显示在忙', () => {
-  justNow('下楼拿快递')
-  const s = herState({ ...cfg, busy: { ...cfg.busy, enabled: false } })
+  busyAt('下楼拿快递')
+  const s = herState({ ...cfg, busy: { ...cfg.busy, enabled: false } }, { at: awakeAt() })
   assert(s.key !== 'busy' && s.key !== 'around', '关掉了还显示在忙：' + s.label)
   return s.label
 })

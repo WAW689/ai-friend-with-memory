@@ -5,6 +5,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /* ------------------------------------------------------------------ 时间 */
 
@@ -162,14 +163,96 @@ export function readJsonl(file) {
 
 /* ------------------------------------------------------------------ 日志 */
 
-function stamp() {
-  return new Date().toISOString().replace('T', ' ').slice(0, 19)
+/** 本地时区的时间戳，形如 2026-09-23 09:58:12 */
+function stamp(ts = Date.now()) {
+  const d = new Date(ts)
+  const p = (n) => String(n).padStart(2, '0')
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  )
+}
+
+/*
+ * 日志往哪儿写。
+ *
+ * 日志目录默认是项目下的 logs/（和 data/ 平级）。测试会把它指到隔离目录，
+ * 免得跑一遍测试就往真实日志里灌几百行。
+ * 这里**不能**去 import config.js —— config.js 自己要用 log，会成环。
+ */
+const LOG_DIR = process.env.FRIEND_LOG_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'logs')
+
+/**
+ * 往 stdout 写会不会**卡死**。
+ *
+ * 这是本项目最阴的一个故障，现象是"服务还活着，但网页打不开、消息也不回"：
+ *
+ *   服务由计划任务拉起时没有控制台，stdout 是一个**没人读的管道**。
+ *   Windows 上往管道写是同步的（POSIX 上不是），管道缓冲满了以后
+ *   console.log 就会**永远阻塞**——进程在、端口在监听、CPU 是 0，
+ *   但整个事件循环停住了。日志越多，死得越快（约两小时后）。
+ *
+ * 而因为它没重定向，那一刻连一行日志都没留下，只能靠猜。
+ *
+ * 所以：只有**确定安全**才往屏幕打——终端（TTY）或者重定向到文件；
+ * 管道、坏句柄一律只写文件。
+ */
+function stdoutIsSafe() {
+  try {
+    if (process.stdout.isTTY) return true
+    return fs.fstatSync(1).isFile()
+  } catch {
+    return false
+  }
+}
+
+const CONSOLE_OK = stdoutIsSafe()
+
+/** 落文件的日志路径（每天一个文件，和界面/文档里说的一致） */
+export function logFilePath(ts = Date.now()) {
+  return path.join(LOG_DIR, `friend-${localDateKey(ts)}.log`)
+}
+
+/** 写一行日志：一定进文件；stdout 安全时同时打屏幕 */
+function writeLine(line) {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true })
+    fs.appendFileSync(logFilePath(), line + '\n', 'utf8')
+  } catch {
+    /* 日志写不进去也不能影响正事 */
+  }
+  if (CONSOLE_OK) {
+    try {
+      process.stdout.write(line + '\n')
+    } catch {
+      /* 同上 */
+    }
+  }
+}
+
+/** 把任意值拼成一行能读的文本 */
+function fmt(value) {
+  if (typeof value === 'string') return value
+  if (value instanceof Error) return value.stack ?? value.message
+  if (value === null || value === undefined) return String(value)
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
 }
 
 export const log = {
-  info: (...args) => console.log(`[${stamp()}]`, ...args),
-  warn: (...args) => console.warn(`[${stamp()}] ⚠`, ...args),
-  error: (...args) => console.error(`[${stamp()}] ✖`, ...args),
+  info: (...args) => writeLine(`[${stamp()}] ${args.map(fmt).join(' ')}`),
+  warn: (...args) => writeLine(`[${stamp()}] ⚠ ${args.map(fmt).join(' ')}`),
+  error: (...args) => writeLine(`[${stamp()}] ✖ ${args.map(fmt).join(' ')}`),
+  /** 原样写一段（启动横幅这种多行文本用），不带时间戳前缀 */
+  line: (text) => {
+    for (const l of String(text ?? '').split('\n')) writeLine(l)
+  },
 }
 
 /* ------------------------------------------------------------------ 其他 */
