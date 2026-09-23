@@ -388,6 +388,33 @@ check('句子里的"一起"不会被当成"一点起"（真踩过的坑）', () 
   return `${w.sleepHour}/${w.wakeHour} 正确`
 })
 
+check('"早上九点起"要按九点算，不能只看"早上"就当成七点（真踩过的坑）', () => {
+  /*
+   * 真实事故，而且是最难发现的那种：**不是解析失败，是解析出一个
+   * 看起来合理的错数**。
+   *
+   * life.md 从"中午前后起"改成"早上九点起"之后，程序解析出来是 7——
+   * 因为时段词那条分支只认"早上"这个词，硬映射成 7，
+   * **后面那个"九点"根本没看**。parsed 还是 true，doctor 也照实打印 7，
+   * 一路都像正常。她明明写着九点起，实际七点就醒。
+   *
+   * 规则应该是：有时刻就以时刻为准，时段词只负责补 12 小时制。
+   */
+  const a = parseSleepWindow('凌晨三四点睡，早上九点起')
+  assert(a.wakeHour === 9, `"早上九点起"解析成了 ${a.wakeHour} 点`)
+  assert(a.sleepHour === 3, `sleepHour 不对：${a.sleepHour}`)
+
+  // 八点、十点同样不能被"早上"吃掉
+  assert(parseSleepWindow('两点睡，早上八点起').wakeHour === 8, '"早上八点起"不对')
+  assert(parseSleepWindow('一点睡，上午十点起').wakeHour === 10, '"上午十点起"不对')
+  // 下午的十二小时制还要补回来
+  assert(parseSleepWindow('四点睡，下午两点起').wakeHour === 14, '"下午两点起"应该补成 14')
+  // 没说钟点的，照样按时段词的默认值
+  assert(parseSleepWindow('凌晨三四点睡，中午前后起').wakeHour === 12, '"中午前后起"不该受影响')
+  assert(parseSleepWindow('三点睡，早上起').wakeHour === 7, '"早上起"（无钟点）该走默认值 7')
+  return '9 / 8 / 10 / 14 / 12 / 7 都对'
+})
+
 check('解析不出来时退回默认值，不报错也不乱算', () => {
   const w = parseSleepWindow('作息乱七八糟')
   assert(w.parsed === false, '不该说解析成功')

@@ -91,9 +91,25 @@ export function parseSleepWindow(lifeText) {
    * 不允许夹的话就漏了——实测"四五点才睡，下午两点起"会被解析成 5/2，
    * 把下午两点当成凌晨两点。
    */
-  const noonMatch = text.match(/(中午|上午|下午|早上|凌晨)\s*[前后左右]*\s*(?:[零一二三四五六七八九十两\d]{1,3}\s*点\s*[前后左右]*\s*)?(?:起|醒)/)
+  const noonMatch = text.match(/(中午|上午|下午|早上|凌晨)\s*[前后左右]*\s*(?:([零一二三四五六七八九十两\d]{1,3})\s*点\s*[前后左右]*\s*)?(?:起|醒)/)
   if (noonMatch) {
-    wakeHour = { 中午: 12, 上午: 10, 下午: 14, 早上: 7, 凌晨: 5 }[noonMatch[1]] ?? null
+    const period = noonMatch[1]
+    const explicit = noonMatch[2] ? toHour(noonMatch[2]) : null
+    if (explicit !== null) {
+      /*
+       * **有时刻就以时刻为准**，时段词只负责补 12 小时制。
+       *
+       * 这里踩过一个很阴的坑：原来只看时段词，不看后面那个数字，
+       * 于是 life.md 里写"早上九点起"，程序解析出来是 **7 点**——
+       * "早上"被硬映射成 7。她明明写着九点，程序让她七点就醒，
+       * 而且**一点提示都没有**：parsed=true，doctor 也照实打印 7。
+       *
+       * 这种错最难发现：不是解析失败，是解析出了一个看起来合理的错数。
+       */
+      wakeHour = period === '下午' || period === '晚上' ? (explicit % 12) + 12 : explicit
+    } else {
+      wakeHour = { 中午: 12, 上午: 10, 下午: 14, 早上: 7, 凌晨: 5 }[period] ?? null
+    }
   }
 
   if (wakeHour === null) {
