@@ -415,6 +415,23 @@ check('"早上九点起"要按九点算，不能只看"早上"就当成七点（
   return '9 / 8 / 10 / 14 / 12 / 7 都对'
 })
 
+check('"凌晨一两点睡"取 1（"一两"这种写法取前一个字）', () => {
+  /*
+   * life.md 里就是这么写的。中文说"一两点"是"1 点到 2 点之间"，
+   * 主体是 1 点——和"三四点睡"取 3 是同一条规则。
+   * 顺手把它钉住：这种"两个字连写"的钟点最容易在改动里被读成别的数。
+   */
+  const w = parseSleepWindow('凌晨一两点睡，早上九点起')
+  assert(w.sleepHour === 1, `"一两点睡"解析成了 ${w.sleepHour} 点`)
+  assert(w.wakeHour === 9, `wakeHour 不对：${w.wakeHour}`)
+  // 相应地，她该在 9 点醒、1 点睡：白天清醒、凌晨在睡
+  const day = sleepiness({ at: at(15), window: w })
+  const night = sleepiness({ at: at(3), window: w })
+  assert(day.level === 0 && !day.isAsleepPeriod, '下午三点应该是清醒的')
+  assert(night.isAsleepPeriod, '凌晨三点应该在睡')
+  return `1 点睡 / 9 点起，下午清醒、凌晨在睡`
+})
+
 check('解析不出来时退回默认值，不报错也不乱算', () => {
   const w = parseSleepWindow('作息乱七八糟')
   assert(w.parsed === false, '不该说解析成功')
